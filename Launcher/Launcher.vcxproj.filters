@@ -28,6 +28,9 @@
     <Filter Include="Process">
       <UniqueIdentifier>{E5F6A7B8-C9D0-1234-EFGH-345678901234}</UniqueIdentifier>
     </Filter>
+    <Filter Include="IPC">
+      <UniqueIdentifier>{F6A7B8C9-D0E1-2345-FGHI-456789012345}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -38,6 +41,9 @@
     </ClCompile>
     <ClCompile Include="src\config\ConfigManager.cpp">
       <Filter>Config</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ipc\IpcBridge.cpp">
+      <Filter>IPC</Filter>
     </ClCompile>
     <ClCompile Include="src\logger\Logger.cpp">
       <Filter>Logger</Filter>
@@ -52,6 +58,9 @@
     </ClInclude>
     <ClInclude Include="src\core\Application.h">
       <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="src\ipc\IpcBridge.h">
+      <Filter>IPC</Filter>
     </ClInclude>
     <ClInclude Include="src\logger\Logger.h">
       <Filter>Logger</Filter>

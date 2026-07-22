@@ -166,12 +166,14 @@
     <ClCompile Include="src\main.cpp" />
     <ClCompile Include="src\core\Application.cpp" />
     <ClCompile Include="src\config\ConfigManager.cpp" />
+    <ClCompile Include="src\ipc\IpcBridge.cpp" />
     <ClCompile Include="src\logger\Logger.cpp" />
     <ClCompile Include="src\process\ProcessManager.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\config\ConfigManager.h" />
     <ClInclude Include="src\core\Application.h" />
+    <ClInclude Include="src\ipc\IpcBridge.h" />
     <ClInclude Include="src\logger\Logger.h" />
     <ClInclude Include="src\process\ProcessManager.h" />
     <ClInclude Include="src\third-party\ipc\include\ipc.h" />

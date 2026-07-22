@@ -1,6 +1,6 @@
 {
     "target": {
-        "path": "testStart/IpcServerTest.exe",
+        "path": "testStart/DMSProcess.exe",
         "workingDir": ""
     }
 }
