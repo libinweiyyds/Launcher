@@ -19,6 +19,15 @@
     <Filter Include="Logger">
       <UniqueIdentifier>{B2C3D4E5-F6A7-8901-BCDE-F12345678901}</UniqueIdentifier>
     </Filter>
+    <Filter Include="ThirdParty">
+      <UniqueIdentifier>{C3D4E5F6-A7B8-9012-CDEF-123456789012}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Config">
+      <UniqueIdentifier>{D4E5F6A7-B8C9-0123-DEFG-234567890123}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Process">
+      <UniqueIdentifier>{E5F6A7B8-C9D0-1234-EFGH-345678901234}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\main.cpp">
@@ -27,16 +36,31 @@
     <ClCompile Include="src\core\Application.cpp">
       <Filter>Core</Filter>
     </ClCompile>
+    <ClCompile Include="src\config\ConfigManager.cpp">
+      <Filter>Config</Filter>
+    </ClCompile>
     <ClCompile Include="src\logger\Logger.cpp">
       <Filter>Logger</Filter>
     </ClCompile>
+    <ClCompile Include="src\process\ProcessManager.cpp">
+      <Filter>Process</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="src\config\ConfigManager.h">
+      <Filter>Config</Filter>
+    </ClInclude>
     <ClInclude Include="src\core\Application.h">
       <Filter>Core</Filter>
     </ClInclude>
     <ClInclude Include="src\logger\Logger.h">
       <Filter>Logger</Filter>
+    </ClInclude>
+    <ClInclude Include="src\process\ProcessManager.h">
+      <Filter>Process</Filter>
+    </ClInclude>
+    <ClInclude Include="src\third-party\ipc\include\ipc.h">
+      <Filter>ThirdParty</Filter>
     </ClInclude>
   </ItemGroup>
 </Project>

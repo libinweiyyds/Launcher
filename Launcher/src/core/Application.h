@@ -2,9 +2,14 @@
 
 #include <Windows.h>
 #include <string>
+#include <memory>
+
+class ProcessManager;
+class ConfigManager;
 
 // 应用程序生命周期管理器（单例）
-// 负责：初始化日志 → 单实例检查 → 启动子进程 → 主循环等待 → 优雅退出
+// 负责：初始化日志 → 单实例检查 → 加载配置 → 启动子进程 → 主循环 → 优雅退出
+// 主循环同时监听子进程退出和配置文件变更
 class Application {
 public:
     // 获取全局唯一实例
@@ -20,20 +25,20 @@ private:
     Application(const Application&) = delete;
     Application& operator=(const Application&) = delete;
 
-    // 初始化阶段：日志、单实例互斥体、启动子进程
+    // 初始化阶段：日志 → 单实例 → 配置 → 启动子进程
     bool init();
 
-    // 主消息循环：等待退出信号
+    // 主循环：WaitForMultipleObjects 等待子进程退出 + 配置变更
     void mainLoop();
 
-    // 清理阶段：终止子进程、关闭日志
+    // 清理阶段：终止子进程 → 释放资源 → 关闭日志
     void shutdown();
 
-    // 启动被管理的目标程序（testStart/DMSProcess.exe）
-    bool startTargetProcess();
+    // 查找配置文件路径（从 exe 目录向上搜索 Config/config.json）
+    std::wstring findConfigPath();
 
-    // 终止被管理的目标程序
-    void stopTargetProcess();
+    // 解析目标程序路径（将配置中的相对路径转为绝对路径）
+    std::wstring resolveTargetPath(const std::string& relativePath);
 
     // 控制台事件回调（处理系统关机、用户注销等）
     static BOOL WINAPI ctrlHandler(DWORD ctrlType);
@@ -41,8 +46,9 @@ private:
     // 静态指针，用于在控制台回调中访问实例
     static Application* s_instance;
 
-    bool m_running = false;         // 主循环运行标志
-    HANDLE m_hProcess = nullptr;    // 子进程句柄
-    DWORD m_dwProcessId = 0;        // 子进程 PID
-    HANDLE m_hMutex = nullptr;      // 单实例互斥体句柄
+    bool m_running = false;
+    HANDLE m_hMutex = nullptr;                                  // 单实例互斥体句柄
+    std::unique_ptr<ConfigManager> m_configMgr;                 // 配置管理器
+    std::unique_ptr<ProcessManager> m_processMgr;               // 进程管理器
+    std::wstring m_currentTargetPath;                           // 当前生效的目标程序路径
 };

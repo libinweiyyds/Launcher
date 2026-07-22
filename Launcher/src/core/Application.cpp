@@ -1,5 +1,7 @@
 ﻿#include "Application.h"
 #include "../logger/Logger.h"
+#include "../config/ConfigManager.h"
+#include "../process/ProcessManager.h"
 #include <filesystem>
 #include <shellapi.h>
 
@@ -22,11 +24,9 @@ Application::~Application() {
 // 程序入口
 // 执行初始化 → 主循环 → 清理的完整生命周期
 int Application::run(HINSTANCE hInstance) {
-    // 注册控制台事件处理器（响应系统关机、用户注销等）
     s_instance = this;
     SetConsoleCtrlHandler(ctrlHandler, TRUE);
 
-    // 屏蔽可能的异常退出，确保日志能记录退出原因
     if (!init()) {
         LOG_ERROR("初始化失败，程序即将退出");
         shutdown();
@@ -35,7 +35,7 @@ int Application::run(HINSTANCE hInstance) {
 
     LOG_INFO("Launcher 启动完成（PID: %lu）", GetCurrentProcessId());
 
-    // 进入主循环，等待退出信号
+    // 进入主循环
     mainLoop();
 
     // 执行清理流程
@@ -44,20 +44,16 @@ int Application::run(HINSTANCE hInstance) {
 }
 
 // 初始化阶段
-// 按顺序执行：日志初始化 → 单实例检查 → 启动目标进程
-// 任一步骤失败则返回 false
+// Logger → 单实例检查 → 加载配置 → 解析目标路径 → 启动子进程
 bool Application::init() {
     // 1. 初始化日志系统
-    // 使用相对路径 ./logs，后续阶段改为从配置文件读取
     if (!Logger::instance().init("./logs")) {
-        // 日志初始化失败，无法记录后续错误
         return false;
     }
 
     LOG_INFO("日志系统初始化完成");
 
     // 2. 单实例检查
-    // 如果已有实例在运行，则拒绝启动
     m_hMutex = CreateMutexW(nullptr, TRUE, L"Global\\Launcher_SingleInstance");
     if (m_hMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
         LOG_ERROR("检测到已有 Launcher 实例在运行，本次启动取消");
@@ -70,172 +66,221 @@ bool Application::init() {
 
     LOG_INFO("单实例检查通过");
 
-    // 3. 启动目标 Qt 程序
-    if (!startTargetProcess()) {
-        LOG_ERROR("目标程序启动失败");
+    // 3. 创建模块
+    m_configMgr = std::make_unique<ConfigManager>();
+    m_processMgr = std::make_unique<ProcessManager>();
+
+    // 4. 加载配置文件
+    std::wstring configPath = findConfigPath();
+    if (!configPath.empty()) {
+        // 将宽字符路径转为 UTF-8 字符串
+        int len = WideCharToMultiByte(CP_UTF8, 0, configPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string configPathStr(len - 1, 0);
+        WideCharToMultiByte(CP_UTF8, 0, configPath.c_str(), -1, &configPathStr[0], len, nullptr, nullptr);
+        m_configMgr->load(configPathStr);
+    } else {
+        LOG_WARN("未找到 Config/config.json，使用默认配置");
+        m_configMgr->load("");  // 使用默认配置
+    }
+
+    // 5. 解析目标程序路径
+    const TargetConfig& target = m_configMgr->getTarget();
+    m_currentTargetPath = resolveTargetPath(target.path);
+
+    // 检查目标文件是否存在
+    if (!fs::exists(m_currentTargetPath)) {
+        LOG_ERROR("目标程序不存在: %ls", m_currentTargetPath.c_str());
         return false;
     }
 
-    LOG_INFO("目标程序已启动（PID: %lu）", m_dwProcessId);
+    // 6. 启动子进程
+    std::wstring workingDir;
+    if (!target.workingDir.empty()) {
+        workingDir = std::wstring(target.workingDir.begin(), target.workingDir.end());
+    }
+
+    if (!m_processMgr->start(m_currentTargetPath, workingDir)) {
+        LOG_ERROR("目标程序启动失败");
+        return false;
+    }
 
     m_running = true;
     return true;
 }
 
-// 主循环：等待退出事件
-// 当 m_running 变为 false 时退出循环
+// 主循环：同时等待子进程退出和配置文件变更
 void Application::mainLoop() {
     LOG_INFO("进入主循环");
-    // Simple polling loop: sleep to avoid busy-waiting
-    // Proper event-based waiting will be added when WebSocket is integrated
+
+    // 获取监听句柄
+    HANDLE hProcess = m_processMgr->getProcessHandle();
+    HANDLE hConfig = m_configMgr->startWatching();
+
     while (m_running) {
-        // 检查子进程是否仍在运行
-        if (m_hProcess) {
-            DWORD exitCode = 0;
-            if (GetExitCodeProcess(m_hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
-                LOG_WARN("目标程序已退出（退出码: %lu）", exitCode);
-                // Phase 2 将在此处实现自动重启逻辑
-                CloseHandle(m_hProcess);
-                m_hProcess = nullptr;
-                m_dwProcessId = 0;
-            }
+        // 构建句柄数组
+        HANDLE handles[2];
+        DWORD count = 0;
+
+        handles[count++] = hProcess;  // 索引 0：子进程句柄
+
+        if (hConfig != nullptr) {
+            handles[count++] = hConfig;  // 索引 1：配置文件变更通知
         }
-        Sleep(1000);
+
+        // 等待任意事件发生
+        DWORD result = WaitForMultipleObjects(count, handles, FALSE, INFINITE);
+
+        if (result == WAIT_OBJECT_0) {
+            // 子进程退出
+            DWORD exitCode = 0;
+            if (GetExitCodeProcess(hProcess, &exitCode)) {
+                LOG_INFO("目标程序已退出（退出码: %lu），Launcher 将退出", exitCode);
+            } else {
+                LOG_INFO("目标程序已退出，Launcher 将退出");
+            }
+            m_running = false;
+        } else if (result == WAIT_OBJECT_0 + 1) {
+            // 配置文件变更 → 热加载
+            LOG_INFO("检测到配置文件变更");
+            if (m_configMgr->checkAndReload()) {
+
+                // 获取新配置的目标路径
+                const TargetConfig& target = m_configMgr->getTarget();
+                std::wstring newPath = resolveTargetPath(target.path);
+
+                // 检查目标路径是否变化
+                if (newPath != m_currentTargetPath) {
+                    LOG_INFO("目标程序路径已变更: %ls → %ls",
+                        m_currentTargetPath.c_str(), newPath.c_str());
+
+                    // 检查新目标是否存在
+                    if (!fs::exists(newPath)) {
+                        LOG_ERROR("新目标程序不存在: %ls，保持当前进程", newPath.c_str());
+                        continue;
+                    }
+
+                    // 停止当前子进程
+                    m_processMgr->stop();
+
+                    // 启动新子进程
+                    std::wstring workingDir;
+                    if (!target.workingDir.empty()) {
+                        workingDir = std::wstring(target.workingDir.begin(),
+                            target.workingDir.end());
+                    }
+
+                    if (m_processMgr->start(newPath, workingDir)) {
+                        m_currentTargetPath = newPath;
+                        hProcess = m_processMgr->getProcessHandle();  // 更新句柄
+                        LOG_INFO("热加载完成，新目标程序已启动");
+                    } else {
+                        LOG_ERROR("热加载失败：新目标程序启动失败，Launcher 将退出");
+                        m_running = false;
+                    }
+                } else {
+                    LOG_INFO("目标程序路径未变化，无需重启");
+                }
+            }
+        } else {
+            // WAIT_FAILED 或其他错误
+            DWORD err = GetLastError();
+            LOG_ERROR("WaitForMultipleObjects 失败（错误码: %lu）", err);
+            m_running = false;
+        }
     }
+
+    m_configMgr->stopWatching();
     LOG_INFO("主循环已退出");
 }
 
-// 清理阶段
-// 逆序释放资源：先终止子进程，再关闭日志
+// 清理阶段：逆序释放资源
 void Application::shutdown() {
     m_running = false;
 
-    // 1. 终止目标进程
-    stopTargetProcess();
+    // 1. 停止配置文件监听
+    if (m_configMgr) {
+        m_configMgr->stopWatching();
+    }
 
-    // 2. 释放单实例互斥体
+    // 2. 终止目标进程
+    if (m_processMgr) {
+        m_processMgr->stop();
+    }
+
+    // 3. 释放单实例互斥体
     if (m_hMutex) {
         ReleaseMutex(m_hMutex);
         CloseHandle(m_hMutex);
         m_hMutex = nullptr;
     }
 
-    // 3. 关闭日志系统（最后关闭，确保前面的日志都能写入）
+    // 4. 关闭日志系统（最后关闭）
     Logger::instance().shutdown();
 
     s_instance = nullptr;
 }
 
-// 启动被管理的目标程序
-// 从可执行文件所在目录向上逐级查找 testStart/DMSProcess.exe
-// 使用 CreateProcess 以独立进程方式启动，隐藏其主窗口
-bool Application::startTargetProcess() {
-    // 获取当前可执行文件所在目录
+// 查找配置文件路径
+// 从 exe 所在目录向上逐级搜索 Config/config.json
+std::wstring Application::findConfigPath() {
     wchar_t exePath[MAX_PATH] = { 0 };
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
-    fs::path exeDir = fs::path(exePath).parent_path();
+    fs::path searchDir = fs::path(exePath).parent_path();
 
-    // 从 exe 所在目录向上逐级查找 testStart/DMSProcess.exe
-    // 避免硬编码路径深度（Debug 和 x64/Debug 深度不同）
-    fs::path targetExe;
-    fs::path searchDir = exeDir;
     for (int i = 0; i < 5; ++i) {
-        fs::path candidate = searchDir / L"testStart" / L"DMSProcess.exe";
+        fs::path candidate = searchDir / L"Config" / L"config.json";
         if (fs::exists(candidate)) {
-            targetExe = fs::canonical(candidate);
-            break;
+            return candidate.wstring();
         }
-        // 到达根目录则停止
         fs::path parent = searchDir.parent_path();
         if (parent == searchDir) break;
         searchDir = parent;
     }
 
-    if (targetExe.empty()) {
-        LOG_ERROR("未找到目标程序（已从 %ls 向上搜索 5 级）", exeDir.c_str());
-        return false;
-    }
-
-    LOG_INFO("正在启动目标程序: %ls", targetExe.c_str());
-
-    // 设置启动信息：隐藏窗口方式启动
-    // 目标程序的工作目录设为其所在目录，确保它找到自己的 DLL 和配置
-    fs::path targetDir = fs::path(targetExe).parent_path();
-
-    STARTUPINFOW si = { sizeof(si) };
-    // 不设置 STARTF_USESHOWWINDOW，让目标程序使用自己的默认显示方式
-    PROCESS_INFORMATION pi = {};
-
-    BOOL result = CreateProcessW(
-        targetExe.c_str(),      // 可执行文件路径
-        nullptr,                // 命令行参数（不附加额外参数）
-        nullptr,                // 进程安全属性
-        nullptr,                // 线程安全属性
-        FALSE,                  // 不继承句柄
-        0,                      // 不附加特殊标志，目标程序正常显示窗口
-        nullptr,                // 环境变量（继承当前进程）
-        targetDir.c_str(),      // 工作目录设为目标程序所在目录
-        &si,
-        &pi
-    );
-
-    if (!result) {
-        DWORD err = GetLastError();
-        LOG_ERROR("CreateProcess 失败（错误码: %lu）", err);
-        return false;
-    }
-
-    // 保存子进程句柄和 PID
-    m_hProcess = pi.hProcess;
-    m_dwProcessId = pi.dwProcessId;
-
-    // 不需要子进程的主线程句柄，立即关闭
-    CloseHandle(pi.hThread);
-
-    LOG_INFO("目标程序启动成功（PID: %lu）", m_dwProcessId);
-
-    return true;
+    return L"";  // 未找到
 }
 
-// 终止目标进程
-// 先尝试温和关闭，超时后强制终止
-void Application::stopTargetProcess() {
-    if (!m_hProcess) return;
+// 解析目标程序路径
+// 将配置中的相对路径转为绝对路径
+// 从 exe 所在目录向上搜索目标文件，兼容不同深度的输出目录
+std::wstring Application::resolveTargetPath(const std::string& relativePath) {
+    wchar_t exePath[MAX_PATH] = { 0 };
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
 
-    LOG_INFO("正在终止目标程序（PID: %lu）", m_dwProcessId);
+    fs::path searchDir = fs::path(exePath).parent_path();
+    std::wstring widePath(relativePath.begin(), relativePath.end());
 
-    // 检查进程是否已经退出
-    DWORD exitCode = 0;
-    if (GetExitCodeProcess(m_hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
-        // 进程已经不存在了
-        LOG_INFO("目标程序已自行退出（退出码: %lu）", exitCode);
-    } else {
-        // 进程仍在运行，强制终止
-        // Phase 2 将改为先发送 WM_CLOSE 温和退出，超时后再强制终止
-        if (TerminateProcess(m_hProcess, 0)) {
-            LOG_INFO("目标程序已被终止");
-        } else {
-            DWORD err = GetLastError();
-            LOG_ERROR("终止目标程序失败（错误码: %lu）", err);
+    // 向上逐级搜索，直到找到目标文件或到达根目录
+    for (int i = 0; i < 5; ++i) {
+        fs::path candidate = searchDir / widePath;
+        if (fs::exists(candidate)) {
+            std::error_code ec;
+            fs::path canonical = fs::canonical(candidate, ec);
+            if (!ec) {
+                return canonical.wstring();
+            }
+            return fs::absolute(candidate).wstring();
         }
+        fs::path parent = searchDir.parent_path();
+        if (parent == searchDir) break;
+        searchDir = parent;
     }
 
-    CloseHandle(m_hProcess);
-    m_hProcess = nullptr;
-    m_dwProcessId = 0;
+    // 搜索失败，回退到基于 exe 目录的绝对路径
+    fs::path exeDir = fs::path(exePath).parent_path();
+    return fs::absolute(exeDir / widePath).wstring();
 }
 
 // 控制台事件处理器
-// 处理系统关机、用户注销等事件，确保优雅退出
-// 注意：Windows 子系统下 SetConsoleCtrlHandler 仍可接收部分事件（关机/注销）
+// 处理系统关机、用户注销等事件
 BOOL WINAPI Application::ctrlHandler(DWORD ctrlType) {
     switch (ctrlType) {
-        case CTRL_C_EVENT:           // Ctrl+C
-        case CTRL_BREAK_EVENT:       // Ctrl+Break
-        case CTRL_CLOSE_EVENT:       // 控制台窗口关闭
-        case CTRL_LOGOFF_EVENT:      // 用户注销
-        case CTRL_SHUTDOWN_EVENT:    // 系统关机
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
             LOG_INFO("收到退出信号（类型: %lu），正在退出...", ctrlType);
             if (s_instance) {
                 s_instance->m_running = false;

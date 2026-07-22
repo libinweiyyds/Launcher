@@ -1,0 +1,6 @@
+{
+    "target": {
+        "path": "testStart/IpcServerTest.exe",
+        "workingDir": ""
+    }
+}
