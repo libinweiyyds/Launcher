@@ -25,6 +25,15 @@ Application::~Application() {
 // 程序入口
 int Application::run(HINSTANCE hInstance) {
     s_instance = this;
+
+    // Debug 模式分配控制台，便于查看日志输出
+#ifdef _DEBUG
+    AllocConsole();
+    FILE* fp;
+    freopen_s(&fp, "CONOUT$", "w", stdout);
+    freopen_s(&fp, "CONOUT$", "w", stderr);
+#endif
+
     SetConsoleCtrlHandler(ctrlHandler, TRUE);
 
     if (!init()) {
@@ -139,16 +148,15 @@ void Application::mainLoop() {
 
         DWORD result = WaitForMultipleObjects(count, handles, FALSE, INFINITE);
 
-        if (result == WAIT_OBJECT_0) {
-            // 子进程退出
-            DWORD exitCode = 0;
-            if (GetExitCodeProcess(hProcess, &exitCode)) {
-                LOG_INFO("目标程序已退出（退出码: %lu），Launcher 将退出", exitCode);
-            } else {
-                LOG_INFO("目标程序已退出，Launcher 将退出");
-            }
+        // 无论哪个事件触发，都主动检查子进程是否还在运行
+        // 避免因其他事件抢先导致进程退出事件被漏掉
+        if (!m_processMgr->isRunning()) {
+            LOG_INFO("目标程序已退出，Launcher 将退出");
             m_running = false;
-        } else if (result == WAIT_OBJECT_0 + 1) {
+            break;
+        }
+
+        if (result == WAIT_OBJECT_0 + 1) {
             // 配置文件变更 → 热加载
             LOG_INFO("检测到配置文件变更");
             if (m_configMgr->checkAndReload()) {
@@ -187,8 +195,8 @@ void Application::mainLoop() {
         } else if (result == WAIT_OBJECT_0 + 2) {
             // IPC 停止事件
             LOG_WARN("IPC 服务异常停止");
-        } else {
-            // WAIT_FAILED 或其他错误
+        } else if (result != WAIT_OBJECT_0) {
+            // 非进程退出事件（WAIT_FAILED 等）
             DWORD err = GetLastError();
             LOG_ERROR("WaitForMultipleObjects 失败（错误码: %lu）", err);
             m_running = false;

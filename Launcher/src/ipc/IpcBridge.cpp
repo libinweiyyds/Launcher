@@ -1,6 +1,7 @@
 ﻿#include "IpcBridge.h"
 #include "../logger/Logger.h"
 #include "../third-party/ipc/include/ipc.h"
+#include <iostream>
 
 IpcBridge::IpcBridge() = default;
 
@@ -151,6 +152,10 @@ void IpcBridge::receiveLoop() {
 
             std::string msg(buffer);
             LOG_INFO("IPC 收到消息: %s", msg.c_str());
+
+#ifdef _DEBUG
+            std::cout << "[IPC] " << msg << std::endl;
+#endif
 
             if (m_msgCallback) {
                 m_msgCallback(msg);
