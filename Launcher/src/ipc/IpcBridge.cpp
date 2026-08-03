@@ -1,41 +1,34 @@
-﻿#include "IpcBridge.h"
+#include "IpcBridge.h"
 #include "../logger/Logger.h"
 #include "../third-party/ipc/include/ipc.h"
 #include <iostream>
 
 IpcBridge::IpcBridge() = default;
 
-// 析构：确保资源释放
 IpcBridge::~IpcBridge() {
     stop();
 }
 
-// 启动 IPC 服务端
+// 启动 IPC 服务端（非阻塞）
+// 创建停止事件和接收线程后立即返回
+// ipc_server_create 在接收线程中调用，不阻塞主线程
 bool IpcBridge::start(const std::string& pipeName) {
     if (m_running) {
         LOG_WARN("IPC 服务已在运行中");
         return false;
     }
 
-    LOG_INFO("正在创建 IPC 服务端: %s", pipeName.c_str());
-
-    // 创建 Named Pipe 服务端
-    m_hServer = ipc_server_create(pipeName.c_str());
-    if (!m_hServer) {
-        LOG_ERROR("IPC 服务端创建失败: %s", pipeName.c_str());
-        return false;
-    }
+    m_pipeName = pipeName;
+    LOG_INFO("正在启动 IPC 服务端: %s", pipeName.c_str());
 
     // 创建停止事件（手动重置）
     m_hStopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!m_hStopEvent) {
         LOG_ERROR("IPC 停止事件创建失败");
-        ipc_close(m_hServer);
-        m_hServer = nullptr;
         return false;
     }
 
-    // 启动接收线程
+    // 启动接收线程（在内部创建 pipe 并等待客户端连接）
     m_running = true;
     m_hThread = CreateThread(nullptr, 0, receiveThreadProc, this, 0, nullptr);
     if (!m_hThread) {
@@ -43,8 +36,6 @@ bool IpcBridge::start(const std::string& pipeName) {
         m_running = false;
         CloseHandle(m_hStopEvent);
         m_hStopEvent = nullptr;
-        ipc_close(m_hServer);
-        m_hServer = nullptr;
         return false;
     }
 
@@ -125,8 +116,24 @@ HANDLE IpcBridge::getStopEvent() const {
 }
 
 // 接收线程入口
+// 在此线程中创建 IPC 服务端（可能阻塞等待客户端连接）
+// 避免阻塞主线程的 init() 流程
 DWORD WINAPI IpcBridge::receiveThreadProc(LPVOID param) {
     auto* self = static_cast<IpcBridge*>(param);
+
+    // 在线程中创建 Named Pipe 服务端（会阻塞直到客户端连接）
+    LOG_INFO("IPC 接收线程启动，创建服务端: %s", self->m_pipeName.c_str());
+    self->m_hServer = ipc_server_create(self->m_pipeName.c_str());
+
+    if (!self->m_hServer) {
+        LOG_ERROR("IPC 服务端创建失败: %s", self->m_pipeName.c_str());
+        if (self->m_hStopEvent) {
+            SetEvent(self->m_hStopEvent);
+        }
+        return 1;
+    }
+
+    LOG_INFO("IPC 服务端已创建: %s", self->m_pipeName.c_str());
     self->receiveLoop();
     return 0;
 }
@@ -136,13 +143,13 @@ void IpcBridge::receiveLoop() {
     char buffer[4096];
 
     while (m_running) {
-        // 阻塞等待接收数据
+        if (!m_hServer) break;
+
         int received = ipc_receive(m_hServer, buffer, sizeof(buffer) - 1);
 
         if (!m_running) break;
 
         if (received > 0) {
-            // 收到数据
             buffer[received] = '\0';
 
             if (!m_connected) {
@@ -161,18 +168,15 @@ void IpcBridge::receiveLoop() {
                 m_msgCallback(msg);
             }
         } else if (received == 0) {
-            // 客户端断开
             if (m_connected) {
                 m_connected = false;
                 LOG_INFO("IPC 客户端已断开，等待重连...");
             }
         } else {
-            // 接收错误
             if (m_connected) {
                 m_connected = false;
                 LOG_ERROR("IPC 接收错误，等待重连...");
             }
-            // 短暂休眠避免错误时忙等
             Sleep(100);
         }
     }

@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <string>
 #include <functional>
@@ -9,13 +9,13 @@ typedef void* IPC_HANDLE;
 
 // IPC 通信桥接类：封装 third-party/ipc 库
 // Launcher 作为 Named Pipe 服务端，等待客户端连接
-// 在独立线程中阻塞接收消息，通过回调通知上层
+// ipc_server_create 在独立线程中调用，不阻塞主线程
 class IpcBridge {
 public:
     IpcBridge();
     ~IpcBridge();
 
-    // 启动 IPC 服务端
+    // 启动 IPC 服务端（非阻塞，立即返回）
     // pipeName: 管道名称（如 "MyService"），底层对应 \\.\pipe\MyService
     bool start(const std::string& pipeName);
 
@@ -42,10 +42,11 @@ private:
     // 接收循环
     void receiveLoop();
 
-    IPC_HANDLE m_hServer = nullptr;       // IPC 服务端句柄
+    HANDLE m_hServer = nullptr;           // IPC 服务端句柄（接收线程中创建）
     HANDLE m_hThread = nullptr;           // 接收线程句柄
     HANDLE m_hStopEvent = nullptr;        // 停止事件（手动重置）
     MessageCallback m_msgCallback;        // 消息接收回调
+    std::string m_pipeName;               // 管道名称
     bool m_running = false;               // 运行标志
     bool m_connected = false;             // 客户端连接状态
 };
