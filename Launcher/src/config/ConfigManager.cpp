@@ -83,6 +83,39 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         }
     }
 
+    // 读取 websocket 配置
+    if (root.isMember("websocket") && root["websocket"].isObject()) {
+        const Json::Value& ws = root["websocket"];
+        if (ws.isMember("address") && ws["address"].isString()) {
+            m_websocket.address = ws["address"].asString();
+        }
+        if (ws.isMember("port") && ws["port"].isInt()) {
+            m_websocket.port = ws["port"].asInt();
+        }
+        if (ws.isMember("group") && ws["group"].isString()) {
+            m_websocket.group = ws["group"].asString();
+        }
+        if (ws.isMember("id") && ws["id"].isInt()) {
+            m_websocket.id = ws["id"].asInt();
+        }
+    }
+
+    // 读取 version 配置
+    if (root.isMember("version") && root["version"].isObject()) {
+        const Json::Value& ver = root["version"];
+        if (ver.isMember("current") && ver["current"].isString()) {
+            m_version.current = ver["current"].asString();
+        }
+        if (ver.isMember("history") && ver["history"].isArray()) {
+            m_version.history.clear();
+            for (const auto& v : ver["history"]) {
+                if (v.isString()) {
+                    m_version.history.push_back(v.asString());
+                }
+            }
+        }
+    }
+
     // 验证 path 不为空
     if (m_target.path.empty()) {
         LOG_ERROR("配置中 target.path 为空");
@@ -95,6 +128,16 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
 // 获取目标程序配置
 const TargetConfig& ConfigManager::getTarget() const {
     return m_target;
+}
+
+// 获取 WebSocket 配置
+const WebsocketConfig& ConfigManager::getWebsocket() const {
+    return m_websocket;
+}
+
+// 获取版本信息
+const VersionInfo& ConfigManager::getVersion() const {
+    return m_version;
 }
 
 // 获取配置文件路径

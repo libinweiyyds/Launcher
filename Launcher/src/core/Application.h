@@ -7,6 +7,10 @@
 class ProcessManager;
 class ConfigManager;
 class IpcBridge;
+class WebSocketClient;
+class VersionManager;
+class DownloadManager;
+class ZipManager;
 
 // 应用程序生命周期管理器（单例）
 // 负责：初始化日志 → 单实例检查 → 加载配置 → 启动子进程 → IPC服务 → 主循环 → 优雅退出
@@ -44,6 +48,15 @@ private:
     // IPC 消息回调
     void onIpcMessage(const std::string& message);
 
+    // WebSocket 消息回调
+    void onWsMessage(int code, const std::string& type,
+                     const std::string& desc, const std::string& data);
+
+    // 处理更新指令
+    void handleWsUpdate(const std::string& version,
+                        const std::string& url,
+                        const std::string& hash);
+
     // 控制台事件回调（处理系统关机、用户注销等）
     static BOOL WINAPI ctrlHandler(DWORD ctrlType);
 
@@ -55,5 +68,9 @@ private:
     std::unique_ptr<ConfigManager> m_configMgr;                 // 配置管理器
     std::unique_ptr<ProcessManager> m_processMgr;               // 进程管理器
     std::unique_ptr<IpcBridge> m_ipcBridge;                     // IPC 通信桥接
+    std::unique_ptr<WebSocketClient> m_wsClient;                // WebSocket 客户端
+    std::unique_ptr<VersionManager> m_versionMgr;               // 版本管理器
+    std::unique_ptr<DownloadManager> m_downloadMgr;             // 下载管理器
+    std::unique_ptr<ZipManager> m_zipMgr;                      // 解压管理器
     std::wstring m_currentTargetPath;                           // 当前生效的目标程序路径
 };

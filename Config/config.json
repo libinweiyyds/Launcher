@@ -2,5 +2,15 @@
     "target": {
         "path": "testStart/DMSProcess.exe",
         "workingDir": ""
+    },
+    "version": {
+        "current": "v1.0.0.0",
+        "history": ["v1.0.0.0"]
+    },
+    "websocket": {
+        "address": "localhost",
+        "port": 8080,
+        "group": "launcher",
+        "id": 1
     }
 }

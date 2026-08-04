@@ -3,6 +3,11 @@
 #include "../config/ConfigManager.h"
 #include "../process/ProcessManager.h"
 #include "../ipc/IpcBridge.h"
+#include "../wsUtil/WebSocketClient.h"
+#include "../update/VersionManager.h"
+#include "../update/DownloadManager.h"
+#include "../update/ZipManager.h"
+#include <nlohmann/json.hpp>
 #include <filesystem>
 #include <shellapi.h>
 
@@ -120,6 +125,29 @@ bool Application::init() {
         return false;
     }
 
+    // 8. 连接 WebSocket
+    m_wsClient = std::make_unique<WebSocketClient>();
+    m_wsClient->onMessage(
+        [this](int code, const std::string& type, const std::string& desc, const std::string& data) {
+            onWsMessage(code, type, desc, data);
+        }
+    );
+
+    const WebsocketConfig& wsCfg = m_configMgr->getWebsocket();
+    LOG_INFO("正在连接 WebSocket: %s:%d/ws/%s/%d",
+        wsCfg.address.c_str(), wsCfg.port, wsCfg.group.c_str(), wsCfg.id);
+    m_wsClient->connect(wsCfg.group, wsCfg.id);
+
+    // 9. 初始化更新模块
+    m_versionMgr = std::make_unique<VersionManager>();
+    const VersionInfo& verInfo = m_configMgr->getVersion();
+    m_versionMgr->setCurrent(verInfo.current);
+    m_versionMgr->setHistory(verInfo.history);
+    m_downloadMgr = std::make_unique<DownloadManager>();
+    m_zipMgr = std::make_unique<ZipManager>();
+
+    LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
+
     m_running = true;
     return true;
 }
@@ -146,7 +174,8 @@ void Application::mainLoop() {
             handles[count++] = hIpcStop; // 索引 2：IPC 停止事件
         }
 
-        DWORD result = WaitForMultipleObjects(count, handles, FALSE, INFINITE);
+        // 用超时替代 INFINITE，确保周期性调用 WebSocket service()
+        DWORD result = WaitForMultipleObjects(count, handles, FALSE, 200);
 
         // 无论哪个事件触发，都主动检查子进程是否还在运行
         // 避免因其他事件抢先导致进程退出事件被漏掉
@@ -195,11 +224,11 @@ void Application::mainLoop() {
         } else if (result == WAIT_OBJECT_0 + 2) {
             // IPC 停止事件
             LOG_WARN("IPC 服务异常停止");
-        } else if (result != WAIT_OBJECT_0) {
-            // 非进程退出事件（WAIT_FAILED 等）
-            DWORD err = GetLastError();
-            LOG_ERROR("WaitForMultipleObjects 失败（错误码: %lu）", err);
-            m_running = false;
+        }
+
+        // 驱动 WebSocket 事件循环（非阻塞轮询）
+        if (m_wsClient) {
+            m_wsClient->service();
         }
     }
 
@@ -219,6 +248,11 @@ void Application::shutdown() {
     // 2. 停止 IPC 服务
     if (m_ipcBridge) {
         m_ipcBridge->stop();
+    }
+
+    // 2.5 断开 WebSocket
+    if (m_wsClient) {
+        m_wsClient->disconnect();
     }
 
     // 3. 终止目标进程
@@ -289,7 +323,131 @@ std::wstring Application::resolveTargetPath(const std::string& relativePath) {
 // IPC 消息回调
 void Application::onIpcMessage(const std::string& message) {
     LOG_INFO("收到 IPC 消息: %s", message.c_str());
-    // Phase 4 将实现消息路由和协议解析
+}
+
+// WebSocket 消息回调
+void Application::onWsMessage(int code, const std::string& type,
+                               const std::string& desc, const std::string& data) {
+    // 非 200 状态码忽略
+    if (code != 200) {
+        LOG_WARN("WS 收到非 200 消息（code=%d, type=%s），已忽略", code, type.c_str());
+        return;
+    }
+
+    LOG_INFO("WS 收到消息: type=%s, desc=%s, data=%s",
+        type.c_str(), desc.c_str(), data.c_str());
+
+    // 处理更新指令
+    if (type == "update") {
+        try {
+            auto j = nlohmann::json::parse(data);
+            std::string version = j.value("version", "");
+            std::string url = j.value("url", "");
+            std::string hash = j.value("hash", "");
+            handleWsUpdate(version, url, hash);
+        } catch (...) {
+            LOG_ERROR("update 指令 data 解析失败: %s", data.c_str());
+        }
+    }
+}
+
+// 处理更新指令
+void Application::handleWsUpdate(const std::string& version,
+                                  const std::string& url,
+                                  const std::string& hash) {
+    // 1. 检查是否需要更新
+    if (!m_versionMgr->needUpdate(version)) {
+        LOG_INFO("已是最新版本: %s", version.c_str());
+        return;
+    }
+
+    LOG_INFO("开始更新: %s → %s", m_versionMgr->getCurrent().c_str(), version.c_str());
+
+    // 2. 下载
+    std::string zipTmp = "download/" + version + ".zip.tmp";
+    std::string zipFinal = "download/" + version + ".zip";
+    if (!m_downloadMgr->download(url, zipTmp)) {
+        LOG_ERROR("下载失败");
+        return;
+    }
+
+    // 3. 校验 Hash
+    if (!hash.empty()) {
+        std::string fileHash = DownloadManager::sha256(zipTmp);
+        if (fileHash != hash) {
+            LOG_ERROR("Hash 校验失败: 期望=%s, 实际=%s", hash.c_str(), fileHash.c_str());
+            std::error_code ec;
+            std::filesystem::remove(zipTmp, ec);
+            return;
+        }
+        LOG_INFO("Hash 校验通过: %s", hash.c_str());
+    }
+
+    // 重命名 .tmp → .zip
+    std::error_code ec;
+    std::filesystem::rename(zipTmp, zipFinal, ec);
+    if (ec) {
+        LOG_ERROR("重命名失败: %s → %s", zipTmp.c_str(), zipFinal.c_str());
+        return;
+    }
+
+    // 4. 解压到临时目录
+    std::string tempDir = "temp/" + version;
+    std::string versionsDir = "versions/" + version;
+    if (!m_zipMgr->extract(zipFinal, tempDir)) {
+        LOG_ERROR("解压失败，回滚");
+        std::filesystem::remove_all(tempDir, ec);
+        std::filesystem::remove(zipFinal, ec);
+        return;
+    }
+
+    // 5. 原子移动 temp → versions
+    std::filesystem::create_directories("versions", ec);
+    std::filesystem::rename(tempDir, versionsDir, ec);
+    if (ec) {
+        LOG_ERROR("原子移动失败，清理: %s → %s", tempDir.c_str(), versionsDir.c_str());
+        std::filesystem::remove_all(tempDir, ec);
+        std::filesystem::remove(zipFinal, ec);
+        return;
+    }
+
+    // 6. 查找 exe
+    std::string newExePath = VersionManager::findExeInDir(versionsDir);
+    if (newExePath.empty()) {
+        LOG_ERROR("更新包中未找到可执行文件，回滚");
+        std::filesystem::remove_all(versionsDir, ec);
+        std::filesystem::remove(zipFinal, ec);
+        return;
+    }
+
+    // 7. 记录版本 + 切换
+    m_versionMgr->recordVersion(version);
+
+    // 停止当前进程
+    m_processMgr->stop();
+
+    // 启动新版本
+    std::wstring widePath(newExePath.begin(), newExePath.end());
+    if (!m_processMgr->start(widePath, L"")) {
+        LOG_ERROR("新版本启动失败，回滚至旧版本");
+        // 切回上一个版本
+        const auto& history = m_versionMgr->getHistory();
+        if (history.size() > 1) {
+            std::string rollbackDir = "versions/" + history[1];
+            std::string rollbackExe = VersionManager::findExeInDir(rollbackDir);
+            if (!rollbackExe.empty()) {
+                std::wstring wideRollback(rollbackExe.begin(), rollbackExe.end());
+                m_processMgr->start(wideRollback, L"");
+            }
+        }
+        return;
+    }
+
+    // 8. 清理旧版本
+    m_versionMgr->cleanup("versions", 2);
+    std::filesystem::remove(zipFinal, ec);
+
+    LOG_INFO("更新成功: %s", version.c_str());
 }
 
 // 控制台事件处理器
