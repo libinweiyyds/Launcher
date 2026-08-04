@@ -94,7 +94,8 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\jsoncpp.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\websockets.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\zd.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\uv.dll" "$(OutDir)" /Y /I
-xcopy "F:\vcpkg\installed\x86-windows\debug\bin\minizip.dll" "$(OutDir)" /Y /I</Command>
+xcopy "F:\vcpkg\installed\x86-windows\debug\bin\minizip.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -123,7 +124,8 @@ copy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /y
-xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I</Command>
+xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -149,7 +151,8 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\jsoncpp.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\websockets.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\zd.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\debug\bin\uv.dll" "$(OutDir)" /Y /I
-xcopy "F:\vcpkg\installed\x86-windows\debug\bin\minizip.dll" "$(OutDir)" /Y /I</Command>
+xcopy "F:\vcpkg\installed\x86-windows\debug\bin\minizip.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -179,7 +182,8 @@ copy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /y
 copy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /y
-xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I</Command>
+xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -190,6 +194,8 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I</Comman
     <ClCompile Include="src\logger\Logger.cpp" />
     <ClCompile Include="src\process\ProcessManager.cpp" />
     <ClCompile Include="src\update\DownloadManager.cpp" />
+    <ClCompile Include="src\update\HttpClient.cpp" />
+    <ClCompile Include="src\update\UpdateUtils.cpp" />
     <ClCompile Include="src\update\VersionManager.cpp" />
     <ClCompile Include="src\update\ZipManager.cpp" />
     <ClCompile Include="src\wsUtil\WebSocketClient.cpp" />
@@ -202,6 +208,8 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I</Comman
     <ClInclude Include="src\process\ProcessManager.h" />
     <ClInclude Include="src\third-party\ipc\include\ipc.h" />
     <ClInclude Include="src\update\DownloadManager.h" />
+    <ClInclude Include="src\update\HttpClient.h" />
+    <ClInclude Include="src\update\UpdateUtils.h" />
     <ClInclude Include="src\update\VersionManager.h" />
     <ClInclude Include="src\update\ZipManager.h" />
     <ClInclude Include="src\wsUtil\WebSocketClient.h" />

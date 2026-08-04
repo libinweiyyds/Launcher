@@ -11,6 +11,7 @@ class WebSocketClient;
 class VersionManager;
 class DownloadManager;
 class ZipManager;
+struct PublishInfo;
 
 // 应用程序生命周期管理器（单例）
 // 负责：初始化日志 → 单实例检查 → 加载配置 → 启动子进程 → IPC服务 → 主循环 → 优雅退出
@@ -42,7 +43,7 @@ private:
     // 查找配置文件路径（从 exe 目录向上搜索 Config/config.json）
     std::wstring findConfigPath();
 
-    // 解析目标程序路径（向上搜索匹配相对路径）
+    // 解析目标程序路径（相对→绝对）
     std::wstring resolveTargetPath(const std::string& relativePath);
 
     // IPC 消息回调
@@ -52,10 +53,15 @@ private:
     void onWsMessage(int code, const std::string& type,
                      const std::string& desc, const std::string& data);
 
-    // 处理更新指令
-    void handleWsUpdate(const std::string& version,
-                        const std::string& url,
-                        const std::string& hash);
+    // 检查更新（启动时调用）
+    void checkForUpdate();
+
+    // 显示更新弹窗，forced=true 只有确认按钮
+    bool showUpdateDialog(const PublishInfo& info, bool forced);
+
+    // 执行下载+解压+切换流程
+    void doUpdate(const std::string& version, int softwareId,
+                  const std::string& host, int port, int reserveNum);
 
     // 控制台事件回调（处理系统关机、用户注销等）
     static BOOL WINAPI ctrlHandler(DWORD ctrlType);

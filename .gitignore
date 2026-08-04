@@ -365,3 +365,7 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+# 更新相关运行时目录
+versions/
+download/
+temp/

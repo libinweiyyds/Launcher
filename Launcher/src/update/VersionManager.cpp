@@ -60,20 +60,18 @@ void VersionManager::cleanup(const std::string& versionsDir, int keepCount) {
     m_history.resize(keepCount);
 }
 
-// 查找目录中的 exe 文件（优先 start.exe）
+// 递归查找目录中的 exe 文件（优先 start.exe）
 std::string VersionManager::findExeInDir(const std::string& dir) {
     fs::path baseDir(dir);
     if (!fs::exists(baseDir)) return "";
 
-    // 优先查找 start.exe
+    // 优先查找根目录下的 start.exe
     fs::path startExe = baseDir / "start.exe";
-    if (fs::exists(startExe)) {
-        return startExe.string();
-    }
+    if (fs::exists(startExe)) return startExe.string();
 
-    // 查找任意 .exe
-    for (const auto& entry : fs::directory_iterator(baseDir)) {
-        if (entry.path().extension() == ".exe") {
+    // 递归查找所有 .exe（处理 zip 内有子文件夹的情况）
+    for (const auto& entry : fs::recursive_directory_iterator(baseDir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".exe") {
             return entry.path().string();
         }
     }

@@ -1,0 +1,168 @@
+﻿#include "UpdateUtils.h"
+#include "HttpClient.h"
+#include "../logger/Logger.h"
+#include <json/json.h>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+
+// URL 编码（简单实现，对中文等非 ASCII 字符进行百分号编码）
+static std::string urlEncode(const std::string& s) {
+    std::ostringstream escaped;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << '%' << std::uppercase << std::hex << (int)c;
+        }
+    }
+    return escaped.str();
+}
+
+// 请求版本发布信息
+PublishInfo UpdateUtils::fetchPublishInfo(const std::string& host, int port,
+                                           const std::string& name) {
+    PublishInfo info;
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/publish/getPublishBySoftWareName?softWareName=" + urlEncode(name);
+
+    LOG_INFO("checking publish: %s", url.c_str());
+    HttpResponse resp = HttpClient::get(url);
+    if (!resp.ok || resp.body.empty()) {
+        LOG_WARN("publish check failed (network)");
+        return info;
+    }
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(resp.body);
+    if (!Json::parseFromStream(builder, stream, &root, &errors)) {
+        LOG_ERROR("publish JSON parse error: %s", errors.c_str());
+        return info;
+    }
+
+    int code = root.get("code", 0).asInt();
+    if (code != 310) { LOG_WARN("publish code=%d, skip", code); return info; }
+
+    const Json::Value& data = root["data"];
+    if (data.empty() || data.get("status", 0).asInt() != 1) {
+        LOG_INFO("software not published");
+        return info;
+    }
+
+    info.valid = true;
+    info.softwareId = data.get("softwareId", 0).asInt();
+    info.minVersion = data.get("minVersion", "").asString();
+    info.recommendVersion = data.get("recommendVersion", "").asString();
+    info.forceUpgrade = data.get("forceUpgrade", 0).asInt();
+    info.clientReserveNum = data.get("clientReserveNum", 2).asInt();
+    info.remark = data.get("remark", "").asString();
+
+    LOG_INFO("publish info: min=%s, rec=%s, force=%d, reserve=%d",
+        info.minVersion.c_str(), info.recommendVersion.c_str(),
+        info.forceUpgrade, info.clientReserveNum);
+    return info;
+}
+
+// 查询文件远程 Hash
+std::string UpdateUtils::fetchFileHash(const std::string& host, int port,
+                                        int softwareId, const std::string& version) {
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/getFileHash/" + std::to_string(softwareId) + "/" + version;
+
+    LOG_INFO("fetching hash: %s", url.c_str());
+    HttpResponse resp = HttpClient::get(url);
+    if (!resp.ok || resp.body.empty()) { LOG_WARN("hash fetch failed"); return ""; }
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(resp.body);
+    if (!Json::parseFromStream(builder, stream, &root, &errors)) { return ""; }
+
+    int code = root.get("code", 0).asInt();
+    if (code != 200) { LOG_WARN("hash fetch code=%d", code); return ""; }
+
+    std::string hash = root["data"].get("fileHash", "").asString();
+    LOG_INFO("remote hash: %s", hash.c_str());
+    return hash;
+}
+
+// 构建下载 URL
+std::string UpdateUtils::buildDownloadUrl(const std::string& host, int port,
+                                           int softwareId, const std::string& version) {
+    return "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/downLoadBySoftWareIdWithVersion?softwareId=" +
+        std::to_string(softwareId) + "&version=" + version;
+}
+
+// 更新 config.json
+bool UpdateUtils::updateConfigVersion(const std::string& configPath,
+                                       const std::string& newVersion,
+                                       const std::vector<std::string>& history) {
+    // 读取现有配置
+    std::ifstream inFile(configPath);
+    if (!inFile) { LOG_ERROR("cannot read config: %s", configPath.c_str()); return false; }
+    std::stringstream buffer;
+    buffer << inFile.rdbuf();
+    inFile.close();
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(buffer.str());
+    if (!Json::parseFromStream(builder, stream, &root, &errors)) { return false; }
+
+    // 修改 version
+    root["version"]["current"] = newVersion;
+    Json::Value histArr(Json::arrayValue);
+    for (const auto& v : history) histArr.append(v);
+    root["version"]["history"] = histArr;
+
+    // 写回（保持中文不转义、不修改 target/software/websocket 等字段）
+    std::ofstream outFile(configPath);
+    if (!outFile) { LOG_ERROR("cannot write config: %s", configPath.c_str()); return false; }
+    Json::StreamWriterBuilder wbuilder;
+    wbuilder["indentation"] = "    ";
+    wbuilder["emitUTF8"] = true;
+    outFile << Json::writeString(wbuilder, root);
+    outFile.close();
+
+    LOG_INFO("config updated: version=%s", newVersion.c_str());
+    return true;
+}
+
+// 版本号比较
+int UpdateUtils::compareVersion(const std::string& a, const std::string& b) {
+    // 去掉前导 v/V
+    auto trimV = [](const std::string& s) -> std::string {
+        if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) return s.substr(1);
+        return s;
+    };
+    std::string va = trimV(a), vb = trimV(b);
+
+    // 按 "." 分割
+    auto split = [](const std::string& s) -> std::vector<int> {
+        std::vector<int> parts;
+        std::istringstream ss(s);
+        std::string token;
+        while (std::getline(ss, token, '.')) {
+            try { parts.push_back(std::stoi(token)); }
+            catch (...) { parts.push_back(0); }
+        }
+        return parts;
+    };
+
+    std::vector<int> pa = split(va), pb = split(vb);
+    size_t maxLen = std::max(pa.size(), pb.size());
+    pa.resize(maxLen, 0);
+    pb.resize(maxLen, 0);
+
+    for (size_t i = 0; i < maxLen; ++i) {
+        if (pa[i] < pb[i]) return -1;
+        if (pa[i] > pb[i]) return 1;
+    }
+    return 0;
+}

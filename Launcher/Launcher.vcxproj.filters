@@ -56,6 +56,12 @@
     <ClCompile Include="src\update\DownloadManager.cpp">
       <Filter>Update</Filter>
     </ClCompile>
+    <ClCompile Include="src\update\HttpClient.cpp">
+      <Filter>Update</Filter>
+    </ClCompile>
+    <ClCompile Include="src\update\UpdateUtils.cpp">
+      <Filter>Update</Filter>
+    </ClCompile>
     <ClCompile Include="src\update\VersionManager.cpp">
       <Filter>Update</Filter>
     </ClCompile>
@@ -86,6 +92,12 @@
       <Filter>ThirdParty</Filter>
     </ClInclude>
     <ClInclude Include="src\update\DownloadManager.h">
+      <Filter>Update</Filter>
+    </ClInclude>
+    <ClInclude Include="src\update\HttpClient.h">
+      <Filter>Update</Filter>
+    </ClInclude>
+    <ClInclude Include="src\update\UpdateUtils.h">
       <Filter>Update</Filter>
     </ClInclude>
     <ClInclude Include="src\update\VersionManager.h">

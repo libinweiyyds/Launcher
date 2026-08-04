@@ -7,6 +7,7 @@
 #include "../update/VersionManager.h"
 #include "../update/DownloadManager.h"
 #include "../update/ZipManager.h"
+#include "../update/UpdateUtils.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <shellapi.h>
@@ -94,28 +95,53 @@ bool Application::init() {
         m_configMgr->load("");
     }
 
-    // 5. 解析目标程序路径
-    const TargetConfig& target = m_configMgr->getTarget();
-    m_currentTargetPath = resolveTargetPath(target.path);
+    // 5. 初始化更新模块（先于进程启动，因为要先检查更新）
+    m_versionMgr = std::make_unique<VersionManager>();
+    const VersionInfo& verInfo = m_configMgr->getVersion();
+    m_versionMgr->setCurrent(verInfo.current);
+    m_versionMgr->setHistory(verInfo.history);
+    m_downloadMgr = std::make_unique<DownloadManager>();
+    m_zipMgr = std::make_unique<ZipManager>();
+    LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
+
+    // 6. 检查更新
+    checkForUpdate();
+
+    // 7. 动态解析目标路径: versions/{currentVersion}/{exeName}
+    const auto& sw = m_configMgr->getSoftware();
+    std::string targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
+    m_currentTargetPath = resolveTargetPath(targetPath);
 
     if (!fs::exists(m_currentTargetPath)) {
-        LOG_ERROR("目标程序不存在: %ls", m_currentTargetPath.c_str());
-        return false;
+        LOG_WARN("目标程序不存在: %ls，自动下载版本 %s",
+            m_currentTargetPath.c_str(), m_versionMgr->getCurrent().c_str());
+        const auto& ws = m_configMgr->getWebsocket();
+        const auto& sw = m_configMgr->getSoftware();
+        auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
+        int sid = pubInfo.valid ? pubInfo.softwareId : 0;
+        if (sid == 0) { LOG_ERROR("无法获取 softwareId，放弃下载"); return false; }
+        doUpdate(m_versionMgr->getCurrent(), sid, ws.address, ws.port, 2);
+        m_currentTargetPath = resolveTargetPath(targetPath);
+        if (!fs::exists(m_currentTargetPath)) {
+            LOG_ERROR("下载后目标仍不存在: %ls", m_currentTargetPath.c_str());
+            return false;
+        }
     }
 
-    // 6. 启动子进程
-    std::wstring workingDir;
-    if (!target.workingDir.empty()) {
-        workingDir = std::wstring(target.workingDir.begin(), target.workingDir.end());
+    // 8. 启动子进程（如果 checkForUpdate/doUpdate 已经启动了则跳过）
+    if (!m_processMgr->isRunning()) {
+        fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
+        std::wstring workingDir = exeDir.wstring();
+        if (!m_processMgr->start(m_currentTargetPath, workingDir)) {
+            LOG_ERROR("目标程序启动失败");
+            return false;
+        }
+    } else {
+        LOG_INFO("子进程已在运行，跳过启动");
     }
 
-    if (!m_processMgr->start(m_currentTargetPath, workingDir)) {
-        LOG_ERROR("目标程序启动失败");
-        return false;
-    }
-
-    // 7. 启动 IPC 服务端
-    m_ipcBridge = std::make_unique<IpcBridge>();
+    // 9. 启动 IPC 服务端
+    /*m_ipcBridge = std::make_unique<IpcBridge>();
     m_ipcBridge->setMessageCallback(
         [this](const std::string& msg) { onIpcMessage(msg); }
     );
@@ -123,10 +149,10 @@ bool Application::init() {
     if (!m_ipcBridge->start("MyService")) {
         LOG_ERROR("IPC 服务启动失败");
         return false;
-    }
+    }*/
 
     // 8. 连接 WebSocket
-    m_wsClient = std::make_unique<WebSocketClient>();
+    /*m_wsClient = std::make_unique<WebSocketClient>();
     m_wsClient->onMessage(
         [this](int code, const std::string& type, const std::string& desc, const std::string& data) {
             onWsMessage(code, type, desc, data);
@@ -136,17 +162,8 @@ bool Application::init() {
     const WebsocketConfig& wsCfg = m_configMgr->getWebsocket();
     LOG_INFO("正在连接 WebSocket: %s:%d/ws/%s/%d",
         wsCfg.address.c_str(), wsCfg.port, wsCfg.group.c_str(), wsCfg.id);
-    m_wsClient->connect(wsCfg.group, wsCfg.id);
+    m_wsClient->connect(wsCfg.group, wsCfg.id);*/
 
-    // 9. 初始化更新模块
-    m_versionMgr = std::make_unique<VersionManager>();
-    const VersionInfo& verInfo = m_configMgr->getVersion();
-    m_versionMgr->setCurrent(verInfo.current);
-    m_versionMgr->setHistory(verInfo.history);
-    m_downloadMgr = std::make_unique<DownloadManager>();
-    m_zipMgr = std::make_unique<ZipManager>();
-
-    LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
 
     m_running = true;
     return true;
@@ -158,7 +175,7 @@ void Application::mainLoop() {
 
     HANDLE hProcess = m_processMgr->getProcessHandle();
     HANDLE hConfig = m_configMgr->startWatching();
-    HANDLE hIpcStop = m_ipcBridge->getStopEvent();
+    HANDLE hIpcStop = m_ipcBridge ? m_ipcBridge->getStopEvent() : nullptr;
 
     while (m_running) {
         HANDLE handles[3];
@@ -189,36 +206,21 @@ void Application::mainLoop() {
             // 配置文件变更 → 热加载
             LOG_INFO("检测到配置文件变更");
             if (m_configMgr->checkAndReload()) {
-                const TargetConfig& target = m_configMgr->getTarget();
-                std::wstring newPath = resolveTargetPath(target.path);
+                const auto& sw = m_configMgr->getSoftware();
+                std::string newTargetPath = "versions/" + m_configMgr->getVersion().current + "/" + sw.exeName;
+                std::wstring newPath = resolveTargetPath(newTargetPath);
 
                 if (newPath != m_currentTargetPath) {
-                    LOG_INFO("目标程序路径已变更: %ls → %ls",
-                        m_currentTargetPath.c_str(), newPath.c_str());
-
-                    if (!fs::exists(newPath)) {
-                        LOG_ERROR("新目标程序不存在: %ls，保持当前进程", newPath.c_str());
-                        continue;
-                    }
-
+                    if (!fs::exists(newPath)) { LOG_ERROR("新目标不存在: %ls", newPath.c_str()); continue; }
                     m_processMgr->stop();
-
-                    std::wstring newWorkingDir;
-                    if (!target.workingDir.empty()) {
-                        newWorkingDir = std::wstring(target.workingDir.begin(),
-                            target.workingDir.end());
-                    }
-
-                    if (m_processMgr->start(newPath, newWorkingDir)) {
+                    fs::path exeDir = fs::path(newPath).parent_path();
+                    if (m_processMgr->start(newPath, exeDir.wstring())) {
                         m_currentTargetPath = newPath;
                         hProcess = m_processMgr->getProcessHandle();
-                        LOG_INFO("热加载完成，新目标程序已启动");
+                        LOG_INFO("热加载完成");
                     } else {
-                        LOG_ERROR("热加载失败：新目标程序启动失败，Launcher 将退出");
                         m_running = false;
                     }
-                } else {
-                    LOG_INFO("目标程序路径未变化，无需重启");
                 }
             }
         } else if (result == WAIT_OBJECT_0 + 2) {
@@ -293,31 +295,13 @@ std::wstring Application::findConfigPath() {
     return L"";
 }
 
-// 解析目标程序路径
+// 解析目标程序路径（相对于工作目录）
 std::wstring Application::resolveTargetPath(const std::string& relativePath) {
-    wchar_t exePath[MAX_PATH] = { 0 };
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-
-    fs::path searchDir = fs::path(exePath).parent_path();
     std::wstring widePath(relativePath.begin(), relativePath.end());
-
-    for (int i = 0; i < 5; ++i) {
-        fs::path candidate = searchDir / widePath;
-        if (fs::exists(candidate)) {
-            std::error_code ec;
-            fs::path canonical = fs::canonical(candidate, ec);
-            if (!ec) {
-                return canonical.wstring();
-            }
-            return fs::absolute(candidate).wstring();
-        }
-        fs::path parent = searchDir.parent_path();
-        if (parent == searchDir) break;
-        searchDir = parent;
-    }
-
-    fs::path exeDir = fs::path(exePath).parent_path();
-    return fs::absolute(exeDir / widePath).wstring();
+    std::error_code ec;
+    fs::path absolute = fs::absolute(fs::path(widePath), ec);
+    if (!ec) return absolute.wstring();
+    return fs::path(widePath).wstring();
 }
 
 // IPC 消息回调
@@ -337,117 +321,194 @@ void Application::onWsMessage(int code, const std::string& type,
     LOG_INFO("WS 收到消息: type=%s, desc=%s, data=%s",
         type.c_str(), desc.c_str(), data.c_str());
 
-    // 处理更新指令
-    if (type == "update") {
-        try {
-            auto j = nlohmann::json::parse(data);
-            std::string version = j.value("version", "");
-            std::string url = j.value("url", "");
-            std::string hash = j.value("hash", "");
-            handleWsUpdate(version, url, hash);
-        } catch (...) {
-            LOG_ERROR("update 指令 data 解析失败: %s", data.c_str());
-        }
-    }
 }
 
-// 处理更新指令
-void Application::handleWsUpdate(const std::string& version,
-                                  const std::string& url,
-                                  const std::string& hash) {
-    // 1. 检查是否需要更新
-    if (!m_versionMgr->needUpdate(version)) {
-        LOG_INFO("已是最新版本: %s", version.c_str());
-        return;
-    }
+// 检查更新
+void Application::checkForUpdate() {
+    const auto& ws = m_configMgr->getWebsocket();
+    const auto& sw = m_configMgr->getSoftware();
 
-    LOG_INFO("开始更新: %s → %s", m_versionMgr->getCurrent().c_str(), version.c_str());
+    auto info = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
+    if (!info.valid) return;
 
-    // 2. 下载
-    std::string zipTmp = "download/" + version + ".zip.tmp";
-    std::string zipFinal = "download/" + version + ".zip";
-    if (!m_downloadMgr->download(url, zipTmp)) {
-        LOG_ERROR("下载失败");
-        return;
-    }
+    // 校验本地版本号格式（按 "." 分割后至少 3 段），无效则用服务端版本覆盖
+    auto validFormat = [](const std::string& v) {
+        auto trimV = [](const std::string& s) {
+            if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) return s.substr(1);
+            return s;
+        };
+        std::string s = trimV(v);
+        int dots = 0;
+        for (char c : s) if (c == '.') ++dots;
+        return dots >= 2;  // 至少 "1.0.0" 三段
+    };
 
-    // 3. 校验 Hash
-    if (!hash.empty()) {
-        std::string fileHash = DownloadManager::sha256(zipTmp);
-        if (fileHash != hash) {
-            LOG_ERROR("Hash 校验失败: 期望=%s, 实际=%s", hash.c_str(), fileHash.c_str());
-            std::error_code ec;
-            std::filesystem::remove(zipTmp, ec);
-            return;
-        }
-        LOG_INFO("Hash 校验通过: %s", hash.c_str());
-    }
-
-    // 重命名 .tmp → .zip
-    std::error_code ec;
-    std::filesystem::rename(zipTmp, zipFinal, ec);
-    if (ec) {
-        LOG_ERROR("重命名失败: %s → %s", zipTmp.c_str(), zipFinal.c_str());
-        return;
-    }
-
-    // 4. 解压到临时目录
-    std::string tempDir = "temp/" + version;
-    std::string versionsDir = "versions/" + version;
-    if (!m_zipMgr->extract(zipFinal, tempDir)) {
-        LOG_ERROR("解压失败，回滚");
-        std::filesystem::remove_all(tempDir, ec);
-        std::filesystem::remove(zipFinal, ec);
-        return;
-    }
-
-    // 5. 原子移动 temp → versions
-    std::filesystem::create_directories("versions", ec);
-    std::filesystem::rename(tempDir, versionsDir, ec);
-    if (ec) {
-        LOG_ERROR("原子移动失败，清理: %s → %s", tempDir.c_str(), versionsDir.c_str());
-        std::filesystem::remove_all(tempDir, ec);
-        std::filesystem::remove(zipFinal, ec);
-        return;
-    }
-
-    // 6. 查找 exe
-    std::string newExePath = VersionManager::findExeInDir(versionsDir);
-    if (newExePath.empty()) {
-        LOG_ERROR("更新包中未找到可执行文件，回滚");
-        std::filesystem::remove_all(versionsDir, ec);
-        std::filesystem::remove(zipFinal, ec);
-        return;
-    }
-
-    // 7. 记录版本 + 切换
-    m_versionMgr->recordVersion(version);
-
-    // 停止当前进程
-    m_processMgr->stop();
-
-    // 启动新版本
-    std::wstring widePath(newExePath.begin(), newExePath.end());
-    if (!m_processMgr->start(widePath, L"")) {
-        LOG_ERROR("新版本启动失败，回滚至旧版本");
-        // 切回上一个版本
-        const auto& history = m_versionMgr->getHistory();
-        if (history.size() > 1) {
-            std::string rollbackDir = "versions/" + history[1];
-            std::string rollbackExe = VersionManager::findExeInDir(rollbackDir);
-            if (!rollbackExe.empty()) {
-                std::wstring wideRollback(rollbackExe.begin(), rollbackExe.end());
-                m_processMgr->start(wideRollback, L"");
+    bool localOk = validFormat(m_versionMgr->getCurrent());
+    bool remoteOk = validFormat(info.recommendVersion);
+    if (!localOk || !remoteOk) {
+        LOG_WARN("版本号格式无效（local=%s, remote=%s），以服务端为准",
+            m_versionMgr->getCurrent().c_str(), info.recommendVersion.c_str());
+        if (remoteOk) {
+            m_versionMgr->setCurrent(info.recommendVersion);
+            m_versionMgr->setHistory({info.recommendVersion});
+            if (!m_configMgr->getFilePath().empty()) {
+                UpdateUtils::updateConfigVersion(
+                    std::string(m_configMgr->getFilePath()),
+                    info.recommendVersion,
+                    {info.recommendVersion}
+                );
             }
         }
         return;
     }
 
-    // 8. 清理旧版本
-    m_versionMgr->cleanup("versions", 2);
+    int cmpMin = UpdateUtils::compareVersion(m_versionMgr->getCurrent(), info.minVersion);
+    int cmpRec = UpdateUtils::compareVersion(m_versionMgr->getCurrent(), info.recommendVersion);
+
+    if (cmpMin < 0) {
+        // 低于最低版本 → 强制升级
+        if (showUpdateDialog(info, true)) {
+            doUpdate(info.recommendVersion, info.softwareId,
+                     ws.address, ws.port, info.clientReserveNum);
+        }
+    } else if (cmpRec < 0) {
+        // 低于推荐版本 → 可选升级
+        if (showUpdateDialog(info, false)) {
+            doUpdate(info.recommendVersion, info.softwareId,
+                     ws.address, ws.port, info.clientReserveNum);
+        }
+    } else if (cmpRec > 0) {
+        // 本地版本高于推荐版本 → 强制回滚
+        LOG_WARN("本地版本 %s 高于推荐版本 %s，执行回滚",
+            m_versionMgr->getCurrent().c_str(), info.recommendVersion.c_str());
+        doUpdate(info.recommendVersion, info.softwareId,
+                 ws.address, ws.port, info.clientReserveNum);
+    }
+}
+
+// 显示更新弹窗
+bool Application::showUpdateDialog(const PublishInfo& info, bool forced) {
+    auto toWide = [](const std::string& s) -> std::wstring {
+        int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+        std::wstring ws(len, 0);
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+        return ws;
+    };
+
+    std::wstring msg;
+    if (forced) {
+        msg = L"软件需要更新到最新版本才能继续使用。\n\n版本: " + toWide(info.recommendVersion);
+    } else {
+        std::wstring remark = toWide(info.remark);
+        if (remark.empty()) remark = L"发现新版本，是否更新？";
+        msg = remark + L"\n\n版本: " + toWide(info.recommendVersion);
+    }
+
+    std::wstring title = forced ? L"强制更新" : L"软件更新";
+    UINT flags = MB_ICONINFORMATION | (forced ? MB_OK : MB_OKCANCEL);
+    int result = MessageBoxW(nullptr, msg.c_str(), title.c_str(), flags);
+    return (result == IDOK);
+}
+
+// 执行下载+解压+切换
+void Application::doUpdate(const std::string& version, int softwareId,
+                            const std::string& host, int port, int reserveNum) {
+    LOG_INFO("开始更新: %s -> %s", m_versionMgr->getCurrent().c_str(), version.c_str());
+
+    if (softwareId == 0) { LOG_ERROR("softwareId 为空"); return; }
+
+    std::string expectedHash = UpdateUtils::fetchFileHash(host, port, softwareId, version);
+    if (expectedHash.empty()) { LOG_ERROR("获取 Hash 失败"); return; }
+
+    std::string url = UpdateUtils::buildDownloadUrl(host, port, softwareId, version);
+    std::string zipTmp = "download/" + version + ".zip.tmp";
+    std::string zipFinal = "download/" + version + ".zip";
+
+    // 清理残留旧文件
+    std::error_code ec;
+    std::filesystem::remove(zipTmp, ec);
     std::filesystem::remove(zipFinal, ec);
 
-    LOG_INFO("更新成功: %s", version.c_str());
+    if (!m_downloadMgr->download(url, zipTmp)) { LOG_ERROR("下载失败"); return; }
+
+    // 空文件检测
+    auto fileSize = std::filesystem::file_size(zipTmp);
+    if (fileSize == 0) { LOG_ERROR("下载文件为空"); std::filesystem::remove(zipTmp, ec); return; }
+    LOG_INFO("下载完成: %llu bytes", fileSize);
+
+    std::string actualHash = DownloadManager::sha256(zipTmp);
+    if (actualHash != expectedHash) {
+        LOG_ERROR("Hash mismatch: exp=%s, act=%s", expectedHash.c_str(), actualHash.c_str());
+        std::filesystem::remove(zipTmp, ec); return;
+    }
+    LOG_ERROR("Hash mismatch: exp=%s, act=%s", expectedHash.c_str(), actualHash.c_str());
+    LOG_INFO("SHA256 OK");
+
+    std::filesystem::rename(zipTmp, zipFinal, ec);
+    if (ec) { LOG_ERROR("rename failed"); return; }
+
+    std::string tempDir = "temp/" + version;
+    std::string versionsDir = "versions/" + version;
+    // 清理残留
+    if (std::filesystem::exists(tempDir)) std::filesystem::remove_all(tempDir, ec);
+    if (!m_zipMgr->extract(zipFinal, tempDir)) {
+        LOG_ERROR("extract failed");
+        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return;
+    }
+
+    // 自动展开：如果解压后只有一个子文件夹，进入其内部
+    std::string sourceDir = tempDir;
+    int dirCount = 0, fileCount = 0;
+    fs::path singleSubDir;
+    for (const auto& entry : fs::directory_iterator(tempDir)) {
+        if (entry.is_directory()) { ++dirCount; singleSubDir = entry.path(); }
+        else ++fileCount;
+    }
+    if (dirCount == 1 && fileCount == 0) {
+        sourceDir = singleSubDir.string();
+        LOG_INFO("解压后自动展开: %s → %s", tempDir.c_str(), sourceDir.c_str());
+    }
+
+    std::filesystem::create_directories("versions", ec);
+    if (std::filesystem::exists(versionsDir)) std::filesystem::remove_all(versionsDir, ec);
+
+    std::filesystem::rename(sourceDir, versionsDir, ec);
+    if (ec) {
+        LOG_ERROR("rename failed: %s", ec.message().c_str());
+        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return;
+    }
+
+    std::string newExe = VersionManager::findExeInDir(versionsDir);
+    if (newExe.empty()) {
+        LOG_ERROR("no exe found in update");
+        std::filesystem::remove_all(versionsDir, ec); std::filesystem::remove(zipFinal, ec); return;
+    }
+
+    m_versionMgr->recordVersion(version);
+    UpdateUtils::updateConfigVersion(
+        std::string(m_configMgr->getFilePath()),
+        version,
+        m_versionMgr->getHistory()
+    );
+
+    m_processMgr->stop();
+    std::wstring widePath(newExe.begin(), newExe.end());
+    if (!m_processMgr->start(widePath, L"")) {
+        LOG_ERROR("start new version failed, rolling back");
+        const auto& hist = m_versionMgr->getHistory();
+        if (hist.size() > 1 && !m_configMgr->getFilePath().empty()) {
+            UpdateUtils::updateConfigVersion(
+                std::string(m_configMgr->getFilePath()),
+                hist[1],
+                {hist.begin() + 1, hist.end()}
+            );
+        }
+        return;
+    }
+
+    m_versionMgr->cleanup("versions", reserveNum);
+    std::filesystem::remove(zipFinal, ec);
+    LOG_INFO("update success: %s", version.c_str());
 }
 
 // 控制台事件处理器

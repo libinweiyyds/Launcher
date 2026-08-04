@@ -14,49 +14,32 @@ ConfigManager::~ConfigManager() {
 }
 
 // 加载配置文件
-// 文件不存在时使用默认配置，记录警告
 bool ConfigManager::load(const std::string& filePath) {
     m_filePath = filePath;
 
-    // 尝试读取文件内容
     std::ifstream file(m_filePath);
     if (!file.is_open()) {
         LOG_WARN("配置文件不存在: %s，使用默认配置", m_filePath.c_str());
-        // 使用默认配置：testStart/DMSProcess.exe
-        m_target.path = "testStart/DMSProcess.exe";
-        m_target.workingDir = "";
-        m_prevTarget = m_target;
         return true;
     }
 
-    // 读取整个文件到字符串
     std::stringstream buffer;
     buffer << file.rdbuf();
     std::string content = buffer.str();
     file.close();
 
-    // 确保不是空文件
     if (content.empty()) {
         LOG_WARN("配置文件为空: %s，使用默认配置", m_filePath.c_str());
-        m_target.path = "testStart/DMSProcess.exe";
-        m_target.workingDir = "";
-        m_prevTarget = m_target;
         return true;
     }
 
-    // 解析 JSON
     if (!parseJson(content)) {
-        LOG_ERROR("配置文件 JSON 解析失败: %s，使用默认配置", m_filePath.c_str());
-        m_target.path = "testStart/DMSProcess.exe";
-        m_target.workingDir = "";
-        m_prevTarget = m_target;
+        LOG_ERROR("配置文件 JSON 解析失败: %s", m_filePath.c_str());
         return false;
     }
 
-    // 保存当前配置作为"变更前"的基线
-    m_prevTarget = m_target;
-
-    LOG_INFO("配置文件加载成功: %s (target=%s)", m_filePath.c_str(), m_target.path.c_str());
+    LOG_INFO("配置文件加载成功: %s (version=%s, software=%s)",
+        m_filePath.c_str(), m_version.current.c_str(), m_software.name.c_str());
     return true;
 }
 
@@ -70,17 +53,6 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
     if (!Json::parseFromStream(builder, stream, &root, &errors)) {
         LOG_ERROR("JSON 解析错误: %s", errors.c_str());
         return false;
-    }
-
-    // 读取 target.path
-    if (root.isMember("target") && root["target"].isObject()) {
-        const Json::Value& target = root["target"];
-        if (target.isMember("path") && target["path"].isString()) {
-            m_target.path = target["path"].asString();
-        }
-        if (target.isMember("workingDir") && target["workingDir"].isString()) {
-            m_target.workingDir = target["workingDir"].asString();
-        }
     }
 
     // 读取 websocket 配置
@@ -116,18 +88,18 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         }
     }
 
-    // 验证 path 不为空
-    if (m_target.path.empty()) {
-        LOG_ERROR("配置中 target.path 为空");
-        return false;
+    // 读取 software 配置
+    if (root.isMember("software") && root["software"].isObject()) {
+        const Json::Value& sw = root["software"];
+        if (sw.isMember("name") && sw["name"].isString()) {
+            m_software.name = sw["name"].asString();
+        }
+        if (sw.isMember("exeName") && sw["exeName"].isString()) {
+            m_software.exeName = sw["exeName"].asString();
+        }
     }
 
     return true;
-}
-
-// 获取目标程序配置
-const TargetConfig& ConfigManager::getTarget() const {
-    return m_target;
 }
 
 // 获取 WebSocket 配置
@@ -138,6 +110,11 @@ const WebsocketConfig& ConfigManager::getWebsocket() const {
 // 获取版本信息
 const VersionInfo& ConfigManager::getVersion() const {
     return m_version;
+}
+
+// 获取软件配置
+const SoftwareConfig& ConfigManager::getSoftware() const {
+    return m_software;
 }
 
 // 获取配置文件路径
@@ -186,50 +163,32 @@ void ConfigManager::stopWatching() {
 }
 
 // 检查文件变更并重新加载
-// 返回 true 表示 target.path 发生了变化
 bool ConfigManager::checkAndReload() {
-    if (!m_hChangeNotify) {
-        return false;
-    }
+    if (!m_hChangeNotify) return false;
 
-    // 重置通知，继续监听下一次变更
     FindNextChangeNotification(m_hChangeNotify);
 
-    // 重新读取文件
     std::ifstream file(m_filePath);
-    if (!file.is_open()) {
-        LOG_WARN("配置文件无法访问，保持当前配置");
-        return false;
-    }
+    if (!file.is_open()) { LOG_WARN("配置文件无法访问，保持当前配置"); return false; }
 
     std::stringstream buffer;
     buffer << file.rdbuf();
     std::string content = buffer.str();
     file.close();
+    if (content.empty()) return false;
 
-    if (content.empty()) {
-        return false;
-    }
-
-    // 保存旧配置用于对比
-    std::string oldPath = m_target.path;
-
-    // 重新解析
+    std::string oldVer = m_version.current;
     if (!parseJson(content)) {
         LOG_ERROR("配置文件变更后解析失败，保持当前配置");
-        m_target.path = oldPath;  // 恢复旧值
+        m_version.current = oldVer;
         return false;
     }
 
-    // 检查 target.path 是否变化
-    if (m_target.path != oldPath) {
-        LOG_INFO("配置已变更: target.path %s → %s", oldPath.c_str(), m_target.path.c_str());
-        m_prevTarget.path = oldPath;
+    if (m_version.current != oldVer) {
+        LOG_INFO("配置已变更: version %s → %s", oldVer.c_str(), m_version.current.c_str());
         return true;
     }
 
-    // path 未变，但其他配置可能变了，更新 prevTarget
-    m_prevTarget = m_target;
-    LOG_INFO("配置文件已重载，target.path 未变化");
+    LOG_INFO("配置文件已重载，version 未变化");
     return false;
 }
