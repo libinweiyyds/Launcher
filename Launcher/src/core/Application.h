@@ -53,8 +53,8 @@ private:
     void onWsMessage(int code, const std::string& type,
                      const std::string& desc, const std::string& data);
 
-    // 检查更新（启动时调用）
-    void checkForUpdate();
+    // 检查更新（启动时调用，pubInfo 由 init 中提前查询传入）
+    void checkForUpdate(const PublishInfo& info);
 
     // 显示更新弹窗，forced=true 只有确认按钮
     bool showUpdateDialog(const PublishInfo& info, bool forced);

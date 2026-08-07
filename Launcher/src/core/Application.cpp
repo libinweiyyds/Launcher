@@ -104,23 +104,29 @@ bool Application::init() {
     m_zipMgr = std::make_unique<ZipManager>();
     LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
 
-    // 6. 检查更新
-    checkForUpdate();
-
-    // 7. 动态解析目标路径: versions/{currentVersion}/{exeName}
+    // 6. 获取服务端发布信息（只在 init 中查询一次，checkForUpdate 和下载复用）
+    const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
+    auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
+
+    // 7. 检查更新
+    checkForUpdate(pubInfo);
+
+    // 8. 动态解析目标路径: versions/{currentVersion}/{exeName}
     std::string targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
     m_currentTargetPath = resolveTargetPath(targetPath);
 
     if (!fs::exists(m_currentTargetPath)) {
-        LOG_WARN("目标程序不存在: %ls，自动下载版本 %s",
-            m_currentTargetPath.c_str(), m_versionMgr->getCurrent().c_str());
-        const auto& ws = m_configMgr->getWebsocket();
-        const auto& sw = m_configMgr->getSoftware();
-        auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
+        // 目标不存在 → 使用服务端推荐版本下载，而非本地配置版本
+        std::string dlVersion = pubInfo.valid ? pubInfo.recommendVersion : m_versionMgr->getCurrent();
         int sid = pubInfo.valid ? pubInfo.softwareId : 0;
+        int reserveNum = pubInfo.valid ? pubInfo.clientReserveNum : 2;
+        LOG_WARN("目标程序不存在: %ls，自动下载版本 %s",
+            m_currentTargetPath.c_str(), dlVersion.c_str());
         if (sid == 0) { LOG_ERROR("无法获取 softwareId，放弃下载"); return false; }
-        doUpdate(m_versionMgr->getCurrent(), sid, ws.address, ws.port, 2);
+        doUpdate(dlVersion, sid, ws.address, ws.port, reserveNum);
+        // 版本可能已变更，重新解析路径
+        targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
         m_currentTargetPath = resolveTargetPath(targetPath);
         if (!fs::exists(m_currentTargetPath)) {
             LOG_ERROR("下载后目标仍不存在: %ls", m_currentTargetPath.c_str());
@@ -128,7 +134,7 @@ bool Application::init() {
         }
     }
 
-    // 8. 启动子进程（如果 checkForUpdate/doUpdate 已经启动了则跳过）
+    // 9. 启动子进程（如果 checkForUpdate/doUpdate 已经启动了则跳过）
     if (!m_processMgr->isRunning()) {
         fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
         std::wstring workingDir = exeDir.wstring();
@@ -140,7 +146,7 @@ bool Application::init() {
         LOG_INFO("子进程已在运行，跳过启动");
     }
 
-    // 9. 启动 IPC 服务端
+    // 10. 启动 IPC 服务端
     /*m_ipcBridge = std::make_unique<IpcBridge>();
     m_ipcBridge->setMessageCallback(
         [this](const std::string& msg) { onIpcMessage(msg); }
@@ -313,10 +319,10 @@ void Application::onIpcMessage(const std::string& message) {
 void Application::onWsMessage(int code, const std::string& type,
                                const std::string& desc, const std::string& data) {
     // 非 200 状态码忽略
-    if (code != 200) {
-        LOG_WARN("WS 收到非 200 消息（code=%d, type=%s），已忽略", code, type.c_str());
-        return;
-    }
+   /* if (code != 200) {
+		LOG_WARN("WS 收到非 200 消息（code=%d, type=%s），已忽略", code, type.c_str());
+		return;
+	}*/
 
     LOG_INFO("WS 收到消息: type=%s, desc=%s, data=%s",
         type.c_str(), desc.c_str(), data.c_str());
@@ -324,12 +330,12 @@ void Application::onWsMessage(int code, const std::string& type,
 }
 
 // 检查更新
-void Application::checkForUpdate() {
+// pubInfo 由调用方传入（init 中已查询），避免重复请求
+void Application::checkForUpdate(const PublishInfo& info) {
+    if (!info.valid) return;
+
     const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
-
-    auto info = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
-    if (!info.valid) return;
 
     // 校验本地版本号格式（按 "." 分割后至少 3 段），无效则用服务端版本覆盖
     auto validFormat = [](const std::string& v) {
@@ -365,6 +371,10 @@ void Application::checkForUpdate() {
     int cmpMin = UpdateUtils::compareVersion(m_versionMgr->getCurrent(), info.minVersion);
     int cmpRec = UpdateUtils::compareVersion(m_versionMgr->getCurrent(), info.recommendVersion);
 
+    // 检查目标 exe 是否实际存在（用于修复版本目录被误删的场景）
+    std::string targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
+    bool targetExists = fs::exists(resolveTargetPath(targetPath));
+
     if (cmpMin < 0) {
         // 低于最低版本 → 强制升级
         if (showUpdateDialog(info, true)) {
@@ -381,6 +391,11 @@ void Application::checkForUpdate() {
         // 本地版本高于推荐版本 → 强制回滚
         LOG_WARN("本地版本 %s 高于推荐版本 %s，执行回滚",
             m_versionMgr->getCurrent().c_str(), info.recommendVersion.c_str());
+        doUpdate(info.recommendVersion, info.softwareId,
+                 ws.address, ws.port, info.clientReserveNum);
+    } else if (!targetExists) {
+        // 版本号匹配但 exe 文件缺失（如被误删）→ 使用推荐版本修复
+        LOG_WARN("版本号 %s 匹配但目标文件缺失，执行修复下载", info.recommendVersion.c_str());
         doUpdate(info.recommendVersion, info.softwareId,
                  ws.address, ws.port, info.clientReserveNum);
     }
@@ -441,7 +456,6 @@ void Application::doUpdate(const std::string& version, int softwareId,
         LOG_ERROR("Hash mismatch: exp=%s, act=%s", expectedHash.c_str(), actualHash.c_str());
         std::filesystem::remove(zipTmp, ec); return;
     }
-    LOG_ERROR("Hash mismatch: exp=%s, act=%s", expectedHash.c_str(), actualHash.c_str());
     LOG_INFO("SHA256 OK");
 
     std::filesystem::rename(zipTmp, zipFinal, ec);

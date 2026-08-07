@@ -80,6 +80,7 @@
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>src\third-party\ipc\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -106,6 +107,7 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>src\third-party\ipc\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
@@ -119,11 +121,11 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy "$(ProjectDir)src\third-party\ipc\bin\release\*.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /y
+      <Command>xcopy "$(ProjectDir)src\third-party\ipc\bin\release\*.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
@@ -177,11 +179,11 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
-      <Command>copy "$(ProjectDir)src\third-party\ipc\bin\release\*.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /y
-copy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /y
+      <Command>xcopy "$(ProjectDir)src\third-party\ipc\bin\release\*.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\jsoncpp.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\websockets.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\z.dll" "$(OutDir)" /Y /I
+xcopy "F:\vcpkg\installed\x86-windows\bin\uv.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\bin\minizip.dll" "$(OutDir)" /Y /I
 xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Command>
     </PostBuildEvent>
@@ -201,6 +203,7 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Comman
     <ClCompile Include="src\wsUtil\WebSocketClient.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="resource.h" />
     <ClInclude Include="src\config\ConfigManager.h" />
     <ClInclude Include="src\core\Application.h" />
     <ClInclude Include="src\ipc\IpcBridge.h" />
@@ -213,6 +216,9 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Comman
     <ClInclude Include="src\update\VersionManager.h" />
     <ClInclude Include="src\update\ZipManager.h" />
     <ClInclude Include="src\wsUtil\WebSocketClient.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="Launcher.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
