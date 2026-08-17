@@ -56,6 +56,20 @@ bool DownloadManager::download(const std::string& url, const std::string& tmpPat
         LOG_ERROR("WinHttpReceiveResponse failed"); WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false;
     }
 
+    // 检查 HTTP 状态码，非 200 视为下载失败（避免把服务端错误 JSON 当文件内容保存）
+    DWORD statusCode = 0;
+    DWORD statusCodeSize = sizeof(statusCode);
+    if (WinHttpQueryHeaders(hRequest,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX,
+                            &statusCode, &statusCodeSize, WINHTTP_NO_HEADER_INDEX)) {
+        if (statusCode != 200) {
+            LOG_ERROR("下载失败，HTTP 状态码: %lu (url: %s)", statusCode, url.c_str());
+            WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession);
+            return false;
+        }
+    }
+
     std::ofstream outFile(tmpPath, std::ios::binary);
     if (!outFile) { LOG_ERROR("cannot create tmp file: %s", tmpPath.c_str()); WinHttpCloseHandle(hRequest); WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
 

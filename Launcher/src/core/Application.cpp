@@ -23,7 +23,7 @@ Application& Application::instance() {
     return inst;
 }
 
-// 析构：确保资源释放
+
 Application::~Application() {
     shutdown();
 }
@@ -32,7 +32,6 @@ Application::~Application() {
 int Application::run(HINSTANCE hInstance) {
     s_instance = this;
 
-    // Debug 模式分配控制台，便于查看日志输出
 #ifdef _DEBUG
     AllocConsole();
     FILE* fp;
@@ -56,7 +55,7 @@ int Application::run(HINSTANCE hInstance) {
     return 0;
 }
 
-// 初始化阶段
+// 初始化
 // Logger → 单实例检查 → 加载配置 → 解析目标路径 → 启动子进程 → 启动 IPC
 bool Application::init() {
     // 1. 初始化日志系统
@@ -95,7 +94,7 @@ bool Application::init() {
         m_configMgr->load("");
     }
 
-    // 5. 初始化更新模块（先于进程启动，因为要先检查更新）
+    // 5. 初始化更新模块    检查更新等操作
     m_versionMgr = std::make_unique<VersionManager>();
     const VersionInfo& verInfo = m_configMgr->getVersion();
     m_versionMgr->setCurrent(verInfo.current);
@@ -104,7 +103,7 @@ bool Application::init() {
     m_zipMgr = std::make_unique<ZipManager>();
     LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
 
-    // 6. 获取服务端发布信息（只在 init 中查询一次，checkForUpdate 和下载复用）
+    // 6. 获取服务端发布信息
     const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
     auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
@@ -117,7 +116,8 @@ bool Application::init() {
     m_currentTargetPath = resolveTargetPath(targetPath);
 
     if (!fs::exists(m_currentTargetPath)) {
-        // 目标不存在 → 使用服务端推荐版本下载，而非本地配置版本
+        // 目标不存在
+        // 使用服务端推荐版本下载，而非本地配置版本
         std::string dlVersion = pubInfo.valid ? pubInfo.recommendVersion : m_versionMgr->getCurrent();
         int sid = pubInfo.valid ? pubInfo.softwareId : 0;
         int reserveNum = pubInfo.valid ? pubInfo.clientReserveNum : 2;
@@ -134,7 +134,7 @@ bool Application::init() {
         }
     }
 
-    // 9. 启动子进程（如果 checkForUpdate/doUpdate 已经启动了则跳过）
+    // 9. 启动子进程    已经启动了则跳过避免重复启动
     if (!m_processMgr->isRunning()) {
         fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
         std::wstring workingDir = exeDir.wstring();
@@ -376,14 +376,16 @@ void Application::checkForUpdate(const PublishInfo& info) {
     bool targetExists = fs::exists(resolveTargetPath(targetPath));
 
     if (cmpMin < 0) {
-        // 低于最低版本 → 强制升级
-        if (showUpdateDialog(info, true)) {
+        // 低于最低版本 → 必须升级
+        // forceUpgrade=1 强制直接更新，不弹窗；否则弹窗确认（仅确认按钮）
+        if (info.forceUpgrade == 1 || showUpdateDialog(info, true)) {
             doUpdate(info.recommendVersion, info.softwareId,
                      ws.address, ws.port, info.clientReserveNum);
         }
     } else if (cmpRec < 0) {
-        // 低于推荐版本 → 可选升级
-        if (showUpdateDialog(info, false)) {
+        // 低于推荐版本 → 升级
+        // forceUpgrade=1 强制直接更新，不弹窗；否则弹窗确认（可取消）
+        if (info.forceUpgrade == 1 || showUpdateDialog(info, false)) {
             doUpdate(info.recommendVersion, info.softwareId,
                      ws.address, ws.port, info.clientReserveNum);
         }
