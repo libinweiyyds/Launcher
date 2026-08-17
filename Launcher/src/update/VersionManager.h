@@ -25,6 +25,10 @@ public:
     // 保留最近 keepCount 个版本，删除旧目录
     void cleanup(const std::string& versionsDir, int keepCount = 2);
 
+    // 剔除 history 中所有版本号 > current 的项
+    // 保证不变式：history 中所有版本 ≤ current
+    void pruneHistoryAboveCurrent();
+
     // 查找目录中的 start.exe（或第一个 exe）
     static std::string findExeInDir(const std::string& dir);
 

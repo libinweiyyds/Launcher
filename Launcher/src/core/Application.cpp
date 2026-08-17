@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <shellapi.h>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -108,6 +109,11 @@ bool Application::init() {
     const auto& sw = m_configMgr->getSoftware();
     auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
 
+    // 记录服务端推荐版本（用于回滚约束：不允许启动比推荐版还新的版本）
+    if (pubInfo.valid) {
+        m_lastRecommendVersion = pubInfo.recommendVersion;
+    }
+
     // 7. 检查更新
     checkForUpdate(pubInfo);
 
@@ -124,13 +130,30 @@ bool Application::init() {
         LOG_WARN("目标程序不存在: %ls，自动下载版本 %s",
             m_currentTargetPath.c_str(), dlVersion.c_str());
         if (sid == 0) { LOG_ERROR("无法获取 softwareId，放弃下载"); return false; }
-        doUpdate(dlVersion, sid, ws.address, ws.port, reserveNum);
-        // 版本可能已变更，重新解析路径
+        bool updateOk = doUpdate(dlVersion, sid, ws.address, ws.port, reserveNum);
+        // 重新解析路径（doUpdate 成功后 m_versionMgr->current 已经是新版本）
         targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
         m_currentTargetPath = resolveTargetPath(targetPath);
-        if (!fs::exists(m_currentTargetPath)) {
-            LOG_ERROR("下载后目标仍不存在: %ls", m_currentTargetPath.c_str());
-            return false;
+        if (!updateOk || !fs::exists(m_currentTargetPath)) {
+            // 下载失败 → 尝试回滚到历史版本（上限为服务端推荐版本）
+            if (tryRollback(m_lastRecommendVersion)) {
+                // 校验回滚后的版本不超过 recommendVersion
+                if (!m_lastRecommendVersion.empty() &&
+                    UpdateUtils::compareVersion(m_versionMgr->getCurrent(),
+                                                m_lastRecommendVersion) > 0) {
+                    LOG_ERROR("回滚后版本仍高于服务端上限 %s",
+                        m_lastRecommendVersion.c_str());
+                    showStartupFailureDialog(L"启动失败：回滚版本仍超出服务端限制");
+                    return false;
+                }
+                LOG_WARN("下载失败，已自动回滚到历史版本");
+                showStartupFailureDialog(L"下载新版本失败，已自动回滚到旧版本继续运行");
+                // 继续运行，不退出
+            } else {
+                LOG_ERROR("下载失败，且无可用历史版本");
+                showStartupFailureDialog(L"启动失败：无法下载新版本且无可用历史版本");
+                return false;
+            }
         }
     }
 
@@ -379,27 +402,68 @@ void Application::checkForUpdate(const PublishInfo& info) {
         // 低于最低版本 → 必须升级
         // forceUpgrade=1 强制直接更新，不弹窗；否则弹窗确认（仅确认按钮）
         if (info.forceUpgrade == 1 || showUpdateDialog(info, true)) {
-            doUpdate(info.recommendVersion, info.softwareId,
-                     ws.address, ws.port, info.clientReserveNum);
+            if (!doUpdate(info.recommendVersion, info.softwareId,
+                          ws.address, ws.port, info.clientReserveNum)) {
+                handleUpdateFailure();
+                return;
+            }
         }
     } else if (cmpRec < 0) {
         // 低于推荐版本 → 升级
         // forceUpgrade=1 强制直接更新，不弹窗；否则弹窗确认（可取消）
         if (info.forceUpgrade == 1 || showUpdateDialog(info, false)) {
-            doUpdate(info.recommendVersion, info.softwareId,
-                     ws.address, ws.port, info.clientReserveNum);
+            if (!doUpdate(info.recommendVersion, info.softwareId,
+                          ws.address, ws.port, info.clientReserveNum)) {
+                handleUpdateFailure();
+                return;
+            }
         }
     } else if (cmpRec > 0) {
-        // 本地版本高于推荐版本 → 强制回滚
-        LOG_WARN("本地版本 %s 高于推荐版本 %s，执行回滚",
+        // 本地版本高于推荐版本 → 强制回滚到推荐版本
+        LOG_WARN("本地版本 %s 高于推荐版本 %s，执行降级",
             m_versionMgr->getCurrent().c_str(), info.recommendVersion.c_str());
-        doUpdate(info.recommendVersion, info.softwareId,
-                 ws.address, ws.port, info.clientReserveNum);
+        if (!doUpdate(info.recommendVersion, info.softwareId,
+                      ws.address, ws.port, info.clientReserveNum)) {
+            handleUpdateFailure();
+            return;
+        }
     } else if (!targetExists) {
         // 版本号匹配但 exe 文件缺失（如被误删）→ 使用推荐版本修复
         LOG_WARN("版本号 %s 匹配但目标文件缺失，执行修复下载", info.recommendVersion.c_str());
-        doUpdate(info.recommendVersion, info.softwareId,
-                 ws.address, ws.port, info.clientReserveNum);
+        if (!doUpdate(info.recommendVersion, info.softwareId,
+                      ws.address, ws.port, info.clientReserveNum)) {
+            handleUpdateFailure();
+            return;
+        }
+    }
+}
+
+// 更新失败后的统一处理：先尝试回滚到历史版本，回滚失败再弹窗 + 通知主循环退出
+// 回滚时使用服务端 recommendVersion 作为上限，确保不启动比推荐版还新的版本
+void Application::handleUpdateFailure() {
+    const std::string failedVer = m_versionMgr->getCurrent();
+    const std::string maxAllowed = m_lastRecommendVersion;  // 服务端推荐版本作上限
+    if (tryRollback(maxAllowed)) {
+        const std::string& newVer = m_versionMgr->getCurrent();
+        // 回滚后再次校验：current 不能超过 recommendVersion
+        if (!maxAllowed.empty() &&
+            UpdateUtils::compareVersion(newVer, maxAllowed) > 0) {
+            LOG_ERROR("回滚后版本 %s 仍高于服务端上限 %s，违规！",
+                newVer.c_str(), maxAllowed.c_str());
+            showStartupFailureDialog(L"启动失败：回滚版本仍超出服务端限制");
+            m_running = false;
+            return;
+        }
+        LOG_WARN("更新失败: %s 启动失败 → 已回滚到历史版本 %s 继续运行",
+            failedVer.c_str(), newVer.c_str());
+        std::wstring msg = L"更新失败: " + utf8ToWide(failedVer) +
+                           L"\n\n已自动回滚到版本: " + utf8ToWide(newVer) +
+                           L"\n\n继续运行";
+        showStartupFailureDialog(msg);
+    } else {
+        LOG_ERROR("更新失败: %s 启动失败，且无可用历史版本", failedVer.c_str());
+        showStartupFailureDialog(L"启动失败：无法启动新版本且无可用历史版本");
+        m_running = false;  // 通知主循环退出
     }
 }
 
@@ -427,15 +491,95 @@ bool Application::showUpdateDialog(const PublishInfo& info, bool forced) {
     return (result == IDOK);
 }
 
+// 显示启动失败弹窗（仅确认按钮），通知用户当前问题
+void Application::showStartupFailureDialog(const std::wstring& reason) {
+    MessageBoxW(nullptr, reason.c_str(), L"启动失败", MB_ICONWARNING | MB_OK);
+}
+
+// UTF-8 字符串 → 宽字符串（用于中文显示）
+std::wstring Application::utf8ToWide(const std::string& s) {
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring ws(len, 0);
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &ws[0], len);
+    return ws;
+}
+
+// 用 history 中的旧版本尝试启动
+// 跳过当前失败版本；返回 true 表示启动成功（m_currentTargetPath/m_current 已更新）
+// maxAllowedVersion 非空时，跳过所有版本号 > maxAllowedVersion 的历史版本
+// （远程控制回滚场景：不允许启动比服务端推荐版本还新的版本）
+bool Application::tryRollback(const std::string& maxAllowedVersion) {
+    const auto& history = m_versionMgr->getHistory();
+    const auto& sw = m_configMgr->getSoftware();
+    const std::string failedVer = m_versionMgr->getCurrent();
+
+    LOG_WARN("开始回滚，当前版本 %s 不可用，尝试启动历史版本%s",
+        failedVer.c_str(),
+        maxAllowedVersion.empty() ? "" : ("（限制 ≤ " + maxAllowedVersion + "）").c_str());
+
+    for (const auto& ver : history) {
+        // 跳过当前失败版本，避免重复尝试
+        if (ver == failedVer) continue;
+
+        // 跳过超出服务端允许上限的版本（远程控制回滚场景）
+        if (!maxAllowedVersion.empty() &&
+            UpdateUtils::compareVersion(ver, maxAllowedVersion) > 0) {
+            LOG_WARN("历史版本 %s 高于服务端上限 %s，跳过",
+                ver.c_str(), maxAllowedVersion.c_str());
+            continue;
+        }
+
+        std::string targetRel = "versions/" + ver + "/" + sw.exeName;
+        std::wstring targetAbs = resolveTargetPath(targetRel);
+
+        if (!fs::exists(targetAbs)) {
+            LOG_WARN("历史版本 %s 目录不存在，跳过", ver.c_str());
+            continue;
+        }
+
+        std::wstring widePath(targetAbs.begin(), targetAbs.end());
+        if (!m_processMgr->start(widePath, L"")) {
+            LOG_WARN("历史版本 %s 启动失败，跳过", ver.c_str());
+            continue;
+        }
+
+        // 启动成功 → 更新内部状态与 config
+        m_currentTargetPath = targetAbs;
+        m_versionMgr->setCurrent(ver);  // current 指向回滚的旧版本
+        // 重新组织 history：把 ver 移到最前面（移除原位置）
+        std::vector<std::string> newHist = history;
+        newHist.erase(std::remove(newHist.begin(), newHist.end(), ver), newHist.end());
+        newHist.insert(newHist.begin(), ver);
+        m_versionMgr->setHistory(newHist);
+
+        if (!m_configMgr->getFilePath().empty()) {
+            UpdateUtils::updateConfigVersion(
+                std::string(m_configMgr->getFilePath()),
+                ver,
+                newHist
+            );
+        }
+
+        LOG_WARN("回滚成功: %s (失败) → %s (已启动)，history 已同步",
+            failedVer.c_str(), ver.c_str());
+        return true;
+    }
+
+    LOG_ERROR("回滚失败: %s 及所有历史版本均不可用%s",
+        failedVer.c_str(),
+        maxAllowedVersion.empty() ? "" : ("（限制 ≤ " + maxAllowedVersion + "）").c_str());
+    return false;
+}
+
 // 执行下载+解压+切换
-void Application::doUpdate(const std::string& version, int softwareId,
+bool Application::doUpdate(const std::string& version, int softwareId,
                             const std::string& host, int port, int reserveNum) {
     LOG_INFO("开始更新: %s -> %s", m_versionMgr->getCurrent().c_str(), version.c_str());
 
-    if (softwareId == 0) { LOG_ERROR("softwareId 为空"); return; }
+    if (softwareId == 0) { LOG_ERROR("softwareId 为空"); return false; }
 
     std::string expectedHash = UpdateUtils::fetchFileHash(host, port, softwareId, version);
-    if (expectedHash.empty()) { LOG_ERROR("获取 Hash 失败"); return; }
+    if (expectedHash.empty()) { LOG_ERROR("获取 Hash 失败"); return false; }
 
     std::string url = UpdateUtils::buildDownloadUrl(host, port, softwareId, version);
     std::string zipTmp = "download/" + version + ".zip.tmp";
@@ -446,22 +590,22 @@ void Application::doUpdate(const std::string& version, int softwareId,
     std::filesystem::remove(zipTmp, ec);
     std::filesystem::remove(zipFinal, ec);
 
-    if (!m_downloadMgr->download(url, zipTmp)) { LOG_ERROR("下载失败"); return; }
+    if (!m_downloadMgr->download(url, zipTmp)) { LOG_ERROR("下载失败"); return false; }
 
     // 空文件检测
     auto fileSize = std::filesystem::file_size(zipTmp);
-    if (fileSize == 0) { LOG_ERROR("下载文件为空"); std::filesystem::remove(zipTmp, ec); return; }
+    if (fileSize == 0) { LOG_ERROR("下载文件为空"); std::filesystem::remove(zipTmp, ec); return false; }
     LOG_INFO("下载完成: %llu bytes", fileSize);
 
     std::string actualHash = DownloadManager::sha256(zipTmp);
     if (actualHash != expectedHash) {
         LOG_ERROR("Hash mismatch: exp=%s, act=%s", expectedHash.c_str(), actualHash.c_str());
-        std::filesystem::remove(zipTmp, ec); return;
+        std::filesystem::remove(zipTmp, ec); return false;
     }
     LOG_INFO("SHA256 OK");
 
     std::filesystem::rename(zipTmp, zipFinal, ec);
-    if (ec) { LOG_ERROR("rename failed"); return; }
+    if (ec) { LOG_ERROR("rename failed"); std::filesystem::remove(zipFinal, ec); return false; }
 
     std::string tempDir = "temp/" + version;
     std::string versionsDir = "versions/" + version;
@@ -469,7 +613,7 @@ void Application::doUpdate(const std::string& version, int softwareId,
     if (std::filesystem::exists(tempDir)) std::filesystem::remove_all(tempDir, ec);
     if (!m_zipMgr->extract(zipFinal, tempDir)) {
         LOG_ERROR("extract failed");
-        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return;
+        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return false;
     }
 
     // 自动展开：如果解压后只有一个子文件夹，进入其内部
@@ -491,40 +635,37 @@ void Application::doUpdate(const std::string& version, int softwareId,
     std::filesystem::rename(sourceDir, versionsDir, ec);
     if (ec) {
         LOG_ERROR("rename failed: %s", ec.message().c_str());
-        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return;
+        std::filesystem::remove_all(tempDir, ec); std::filesystem::remove(zipFinal, ec); return false;
     }
 
     std::string newExe = VersionManager::findExeInDir(versionsDir);
     if (newExe.empty()) {
         LOG_ERROR("no exe found in update");
-        std::filesystem::remove_all(versionsDir, ec); std::filesystem::remove(zipFinal, ec); return;
+        std::filesystem::remove_all(versionsDir, ec); std::filesystem::remove(zipFinal, ec); return false;
     }
 
     m_versionMgr->recordVersion(version);
+
+    m_processMgr->stop();
+    std::wstring widePath(newExe.begin(), newExe.end());
+    if (!m_processMgr->start(widePath, L"")) {
+        LOG_ERROR("start new version failed, rolling back");
+        m_processMgr->stop();
+        // 启动失败时，回滚到 history[1] 仍由调用方 tryRollback 处理
+        return false;
+    }
+
+    // cleanup 后再写 config，保证 history 与磁盘目录一致
+    m_versionMgr->cleanup("versions", reserveNum);
     UpdateUtils::updateConfigVersion(
         std::string(m_configMgr->getFilePath()),
         version,
         m_versionMgr->getHistory()
     );
 
-    m_processMgr->stop();
-    std::wstring widePath(newExe.begin(), newExe.end());
-    if (!m_processMgr->start(widePath, L"")) {
-        LOG_ERROR("start new version failed, rolling back");
-        const auto& hist = m_versionMgr->getHistory();
-        if (hist.size() > 1 && !m_configMgr->getFilePath().empty()) {
-            UpdateUtils::updateConfigVersion(
-                std::string(m_configMgr->getFilePath()),
-                hist[1],
-                {hist.begin() + 1, hist.end()}
-            );
-        }
-        return;
-    }
-
-    m_versionMgr->cleanup("versions", reserveNum);
     std::filesystem::remove(zipFinal, ec);
     LOG_INFO("update success: %s", version.c_str());
+    return true;
 }
 
 // 控制台事件处理器

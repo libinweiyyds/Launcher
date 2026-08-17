@@ -60,8 +60,26 @@ private:
     bool showUpdateDialog(const PublishInfo& info, bool forced);
 
     // 执行下载+解压+切换流程
-    void doUpdate(const std::string& version, int softwareId,
+    // 返回 true 表示新版本启动成功；false 表示启动失败（调用方应尝试回滚或弹窗）
+    bool doUpdate(const std::string& version, int softwareId,
                   const std::string& host, int port, int reserveNum);
+
+    // 用 history 中的旧版本尝试启动（跳过当前失败版本）
+    // maxAllowedVersion 非空时跳过所有版本号 > maxAllowedVersion 的历史版本
+    // 返回 true 表示启动成功；false 表示无可用历史版本
+    bool tryRollback(const std::string& maxAllowedVersion = "");
+
+    // 当前流程检查到的服务端推荐版本（用于回滚时约束"不许启动比推荐版还新的版本"）
+    std::string m_lastRecommendVersion;
+
+    // 显示启动失败弹窗（仅确认按钮）
+    void showStartupFailureDialog(const std::wstring& reason);
+
+    // 更新失败后的统一处理：先回滚，回滚失败再弹窗 + 让主循环退出
+    void handleUpdateFailure();
+
+    // UTF-8 → Wide 转换（中文不乱码）
+    static std::wstring utf8ToWide(const std::string& s);
 
     // 控制台事件回调（处理系统关机、用户注销等）
     static BOOL WINAPI ctrlHandler(DWORD ctrlType);
