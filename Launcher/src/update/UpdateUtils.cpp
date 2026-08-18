@@ -8,7 +8,7 @@
 #include <algorithm>
 
 // URL 编码（简单实现，对中文等非 ASCII 字符进行百分号编码）
-static std::string urlEncode(const std::string& s) {
+std::string urlEncode(const std::string& s) {
     std::ostringstream escaped;
     for (unsigned char c : s) {
         if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
@@ -22,10 +22,10 @@ static std::string urlEncode(const std::string& s) {
 
 // 请求版本发布信息
 PublishInfo UpdateUtils::fetchPublishInfo(const std::string& host, int port,
-                                           const std::string& name) {
+                                           const std::string& softwareName) {
     PublishInfo info;
     std::string url = "http://" + host + ":" + std::to_string(port) +
-        "/sms/software/publish/getPublishBySoftWareName?softWareName=" + urlEncode(name);
+        "/sms/software/publish/getPublishBySoftWareName?softWareName=" + urlEncode(softwareName);
 
     LOG_INFO("checking publish: %s", url.c_str());
     HttpResponse resp = HttpClient::get(url);
@@ -121,7 +121,7 @@ bool UpdateUtils::updateConfigVersion(const std::string& configPath,
     for (const auto& v : history) histArr.append(v);
     root["version"]["history"] = histArr;
 
-    // 写回（保持中文不转义、不修改 target/software/websocket 等字段）
+    // 写回（保持中文不转义、不修改 target/software/server 等字段）
     std::ofstream outFile(configPath);
     if (!outFile) { LOG_ERROR("cannot write config: %s", configPath.c_str()); return false; }
     Json::StreamWriterBuilder wbuilder;
@@ -132,6 +132,58 @@ bool UpdateUtils::updateConfigVersion(const std::string& configPath,
 
     LOG_INFO("config updated: version=%s", newVersion.c_str());
     return true;
+}
+
+// 请求远程配置（服务端下发的运行时配置）
+// softwareName：中文产品名（来自 config.json 的 softwareName 字段），不是 exe 文件名
+RemoteConfig UpdateUtils::fetchRemoteConfig(const std::string& host, int port,
+                                            const std::string& softwareName,
+                                            const std::string& version) {
+    RemoteConfig cfg;
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/getConfig?softwareName=" + urlEncode(softwareName) +
+        "&version=" + version;
+
+    LOG_INFO("fetching remote config: %s", url.c_str());
+    HttpResponse resp = HttpClient::get(url);
+    if (!resp.ok || resp.body.empty()) {
+        LOG_WARN("remote config fetch failed (network)");
+        return cfg;
+    }
+
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(resp.body);
+    if (!Json::parseFromStream(builder, stream, &root, &errors)) {
+        LOG_ERROR("remote config JSON parse error: %s", errors.c_str());
+        return cfg;
+    }
+
+    int code = root.get("code", 0).asInt();
+    if (code != 200) {
+        LOG_WARN("remote config code=%d, skip", code);
+        return cfg;
+    }
+
+    const Json::Value& data = root["data"];
+    if (data.empty()) {
+        LOG_WARN("remote config data empty");
+        return cfg;
+    }
+
+    cfg.sha256 = data.get("sha256", "").asString();
+    cfg.content = data.get("content", "").asString();
+    cfg.localFilePath = data.get("localFilePath", "").asString();
+    cfg.valid = !cfg.sha256.empty() && !cfg.content.empty() && !cfg.localFilePath.empty();
+
+    if (cfg.valid) {
+        LOG_INFO("remote config fetched: sha256=%s..., localFilePath=%s",
+            cfg.sha256.substr(0, 8).c_str(), cfg.localFilePath.c_str());
+    } else {
+        LOG_WARN("remote config incomplete (sha256/content/localFilePath 任一为空)");
+    }
+    return cfg;
 }
 
 // 版本号比较

@@ -86,7 +86,7 @@
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <AdditionalLibraryDirectories>src\third-party\ipc\bin\debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ipc.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ipc.lib;rpcrt4.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
@@ -115,7 +115,7 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <AdditionalLibraryDirectories>src\third-party\ipc\bin\release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ipc.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ipc.lib;rpcrt4.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -144,7 +144,7 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Comman
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <AdditionalLibraryDirectories>src\third-party\ipc\bin\debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ipc.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ipc.lib;rpcrt4.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
     <PostBuildEvent>
@@ -173,7 +173,7 @@ xcopy "F:\vcpkg\installed\x86-windows\debug\bin\libcurl-d.dll" "$(OutDir)" /Y /I
       <SubSystem>Windows</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
       <AdditionalLibraryDirectories>src\third-party\ipc\bin\release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>ipc.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ipc.lib;rpcrt4.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -195,6 +195,7 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Comman
     <ClCompile Include="src\ipc\IpcBridge.cpp" />
     <ClCompile Include="src\logger\Logger.cpp" />
     <ClCompile Include="src\process\ProcessManager.cpp" />
+    <ClCompile Include="src\update\ConfigSync.cpp" />
     <ClCompile Include="src\update\DownloadManager.cpp" />
     <ClCompile Include="src\update\HttpClient.cpp" />
     <ClCompile Include="src\update\UpdateUtils.cpp" />
@@ -210,6 +211,7 @@ xcopy "F:\vcpkg\installed\x86-windows\bin\libcurl.dll" "$(OutDir)" /Y /I</Comman
     <ClInclude Include="src\logger\Logger.h" />
     <ClInclude Include="src\process\ProcessManager.h" />
     <ClInclude Include="src\third-party\ipc\include\ipc.h" />
+    <ClInclude Include="src\update\ConfigSync.h" />
     <ClInclude Include="src\update\DownloadManager.h" />
     <ClInclude Include="src\update\HttpClient.h" />
     <ClInclude Include="src\update\UpdateUtils.h" />

@@ -8,6 +8,7 @@
 #include "../update/DownloadManager.h"
 #include "../update/ZipManager.h"
 #include "../update/UpdateUtils.h"
+#include "../update/ConfigSync.h"
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <shellapi.h>
@@ -107,11 +108,13 @@ bool Application::init() {
     // 6. 获取服务端发布信息
     const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
-    auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.name);
+    auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.softwareName);
 
     // 记录服务端推荐版本（用于回滚约束：不允许启动比推荐版还新的版本）
     if (pubInfo.valid) {
         m_lastRecommendVersion = pubInfo.recommendVersion;
+        m_lastSoftwareId = pubInfo.softwareId;
+        m_lastReserveNum = pubInfo.clientReserveNum;
     }
 
     // 7. 检查更新
@@ -135,8 +138,8 @@ bool Application::init() {
         targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
         m_currentTargetPath = resolveTargetPath(targetPath);
         if (!updateOk || !fs::exists(m_currentTargetPath)) {
-            // 下载失败 → 尝试回滚到历史版本（上限为服务端推荐版本）
-            if (tryRollback(m_lastRecommendVersion)) {
+            // 下载失败 → 尝试用本地历史版本启动（不设上限，避免降级场景下无可用版本）
+            if (tryRollback("")) {
                 // 校验回滚后的版本不超过 recommendVersion
                 if (!m_lastRecommendVersion.empty() &&
                     UpdateUtils::compareVersion(m_versionMgr->getCurrent(),
@@ -150,15 +153,34 @@ bool Application::init() {
                 showStartupFailureDialog(L"下载新版本失败，已自动回滚到旧版本继续运行");
                 // 继续运行，不退出
             } else {
-                LOG_ERROR("下载失败，且无可用历史版本");
-                showStartupFailureDialog(L"启动失败：无法下载新版本且无可用历史版本");
-                return false;
+                // 本地无任何可用历史版本 → 兜底再下载一次服务端推荐版本
+                if (!m_lastRecommendVersion.empty() && m_lastSoftwareId != 0) {
+                    LOG_WARN("本地无可用历史版本，兜底下载服务端推荐版本: %s",
+                        m_lastRecommendVersion.c_str());
+                    bool fallbackOk = doUpdate(m_lastRecommendVersion, m_lastSoftwareId,
+                                               ws.address, ws.port, m_lastReserveNum);
+                    if (fallbackOk) {
+                        // 重新解析路径
+                        targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
+                        m_currentTargetPath = resolveTargetPath(targetPath);
+                    } else {
+                        LOG_ERROR("兜底下载失败");
+                        showStartupFailureDialog(L"启动失败：无法下载新版本且无可用历史版本");
+                        return false;
+                    }
+                } else {
+                    LOG_ERROR("下载失败，且无可用历史版本");
+                    showStartupFailureDialog(L"启动失败：无法下载新版本且无可用历史版本");
+                    return false;
+                }
             }
         }
     }
 
     // 9. 启动子进程    已经启动了则跳过避免重复启动
     if (!m_processMgr->isRunning()) {
+        // 启动管理软件前先同步远程配置（失败弹窗但不阻塞启动）
+        syncManagedConfig();
         fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
         std::wstring workingDir = exeDir.wstring();
         if (!m_processMgr->start(m_currentTargetPath, workingDir)) {
@@ -243,6 +265,8 @@ void Application::mainLoop() {
                     if (!fs::exists(newPath)) { LOG_ERROR("新目标不存在: %ls", newPath.c_str()); continue; }
                     m_processMgr->stop();
                     fs::path exeDir = fs::path(newPath).parent_path();
+                    // 启动管理软件前先同步远程配置（失败不阻塞）
+                    syncManagedConfig();
                     if (m_processMgr->start(newPath, exeDir.wstring())) {
                         m_currentTargetPath = newPath;
                         hProcess = m_processMgr->getProcessHandle();
@@ -438,33 +462,43 @@ void Application::checkForUpdate(const PublishInfo& info) {
     }
 }
 
-// 更新失败后的统一处理：先尝试回滚到历史版本，回滚失败再弹窗 + 通知主循环退出
-// 回滚时使用服务端 recommendVersion 作为上限，确保不启动比推荐版还新的版本
+// 更新失败后的统一处理：
+// 1) 本地有可启动的历史版本 → 直接用 + 拉远程配置 + 启动（不重复下载）
+// 2) 本地没有可启动版本 → 兜底再下载一次服务端 recommendVersion（启动管理软件前再次拉配置）
+// 3) 兜底下载也失败 → 才弹窗 + 让主循环退出
+// 注意：此处不再用 m_lastRecommendVersion 作为上限，
+// 因为降级场景（远端 < 本地）下历史版本可能本来就 > 推荐版，必须允许回滚到本地可用版本。
 void Application::handleUpdateFailure() {
     const std::string failedVer = m_versionMgr->getCurrent();
-    const std::string maxAllowed = m_lastRecommendVersion;  // 服务端推荐版本作上限
-    if (tryRollback(maxAllowed)) {
+    const auto& ws = m_configMgr->getWebsocket();
+
+    // 1) 本地有可启动历史版本 → tryRollback 内部已同步配置 + 启动
+    if (tryRollback("")) {
         const std::string& newVer = m_versionMgr->getCurrent();
-        // 回滚后再次校验：current 不能超过 recommendVersion
-        if (!maxAllowed.empty() &&
-            UpdateUtils::compareVersion(newVer, maxAllowed) > 0) {
-            LOG_ERROR("回滚后版本 %s 仍高于服务端上限 %s，违规！",
-                newVer.c_str(), maxAllowed.c_str());
-            showStartupFailureDialog(L"启动失败：回滚版本仍超出服务端限制");
-            m_running = false;
-            return;
-        }
-        LOG_WARN("更新失败: %s 启动失败 → 已回滚到历史版本 %s 继续运行",
+        LOG_WARN("更新失败: %s 启动失败 → 已用本地历史版本 %s 启动",
             failedVer.c_str(), newVer.c_str());
         std::wstring msg = L"更新失败: " + utf8ToWide(failedVer) +
-                           L"\n\n已自动回滚到版本: " + utf8ToWide(newVer) +
+                           L"\n\n已使用本地历史版本: " + utf8ToWide(newVer) +
                            L"\n\n继续运行";
         showStartupFailureDialog(msg);
-    } else {
-        LOG_ERROR("更新失败: %s 启动失败，且无可用历史版本", failedVer.c_str());
-        showStartupFailureDialog(L"启动失败：无法启动新版本且无可用历史版本");
-        m_running = false;  // 通知主循环退出
+        return;
     }
+
+    // 2) 本地无可用 → 兜底再下载一次服务端 recommendVersion
+    if (!m_lastRecommendVersion.empty() && m_lastSoftwareId != 0) {
+        LOG_WARN("本地无可用历史版本，兜底下载服务端推荐版本: %s",
+            m_lastRecommendVersion.c_str());
+        // 通过 doUpdate 走完整下载+解压+切换流程（内部会自动拉配置 + 启动）
+        if (doUpdate(m_lastRecommendVersion, m_lastSoftwareId,
+                     ws.address, ws.port, m_lastReserveNum)) {
+            return;  // 兜底成功
+        }
+    }
+
+    // 3) 兜底失败 → 真正无路可走
+    LOG_ERROR("更新失败: %s 启动失败，且无可用历史版本与兜底下载", failedVer.c_str());
+    showStartupFailureDialog(L"启动失败：无法启动新版本且无可用历史版本");
+    m_running = false;  // 通知主循环退出
 }
 
 // 显示更新弹窗
@@ -494,6 +528,39 @@ bool Application::showUpdateDialog(const PublishInfo& info, bool forced) {
 // 显示启动失败弹窗（仅确认按钮），通知用户当前问题
 void Application::showStartupFailureDialog(const std::wstring& reason) {
     MessageBoxW(nullptr, reason.c_str(), L"启动失败", MB_ICONWARNING | MB_OK);
+}
+
+// 拉取远程配置并写入管理软件 exe 的相对路径
+// 失败弹窗但不阻塞启动（用户要求）
+void Application::syncManagedConfig() {
+    if (m_currentTargetPath.empty()) {
+        LOG_WARN("syncManagedConfig: 当前目标路径为空，跳过");
+        return;
+    }
+
+    const auto& ws = m_configMgr->getWebsocket();
+    const auto& sw = m_configMgr->getSoftware();
+    const std::string& ver = m_versionMgr->getCurrent();
+
+    // 请求远程配置（传中文产品名 sw.softwareName，不是 exe 文件名 sw.exeName）
+    auto remote = UpdateUtils::fetchRemoteConfig(ws.address, ws.port, sw.softwareName, ver);
+    if (!remote.valid) {
+        LOG_WARN("syncManagedConfig: 获取远程配置失败");
+        showStartupFailureDialog(L"获取最新配置文件失败，将以旧配置启动");
+        return;
+    }
+
+    // 解析管理软件 exe 所在目录作为基准
+    fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
+    std::wstring baseDir = exeDir.wstring();
+
+    // 同步到本地
+    if (!ConfigSync::syncConfig(remote, baseDir)) {
+        LOG_ERROR("syncManagedConfig: 同步远程配置到本地失败");
+        showStartupFailureDialog(L"同步最新配置文件失败，将以旧配置启动");
+        return;
+    }
+    LOG_INFO("syncManagedConfig: 远程配置已同步完成");
 }
 
 // UTF-8 字符串 → 宽字符串（用于中文显示）
@@ -559,6 +626,9 @@ bool Application::tryRollback(const std::string& maxAllowedVersion) {
                 newHist
             );
         }
+
+        // 启动管理软件前先同步远程配置（失败不阻塞）
+        syncManagedConfig();
 
         LOG_WARN("回滚成功: %s (失败) → %s (已启动)，history 已同步",
             failedVer.c_str(), ver.c_str());
@@ -648,6 +718,10 @@ bool Application::doUpdate(const std::string& version, int softwareId,
 
     m_processMgr->stop();
     std::wstring widePath(newExe.begin(), newExe.end());
+    // 更新 m_currentTargetPath 用于 syncManagedConfig 解析父目录
+    m_currentTargetPath = widePath;
+    // 启动管理软件前先同步远程配置
+    syncManagedConfig();
     if (!m_processMgr->start(widePath, L"")) {
         LOG_ERROR("start new version failed, rolling back");
         m_processMgr->stop();

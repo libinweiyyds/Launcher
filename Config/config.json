@@ -1,16 +1,23 @@
 {
-    "version": {
-        "current": "v1.0.0.0",
-        "history": ["v1.0.0.0"]
+    "server" : 
+    {
+        "address" : "localhost",
+        "group" : "launcher",
+        "id" : "00000000-0000-0000-0000-000000000000",
+        "port" : 8080
     },
-    "websocket": {
-        "address": "localhost",
-        "port": 8080,
-        "group": "launcher",
-        "id": 1
+    "software" : 
+    {
+        "exeName" : "start.exe",
+        "softwareName" : "带exe的测试软件"
     },
-    "software": {
-        "name": "测试软件",
-        "exeName": "start.exe"
+    "version" : 
+    {
+        "current" : "1.0.0.0",
+        "history" : 
+        [
+            "1.0.0.0",
+            "v1.0.0.0"
+        ]
     }
 }

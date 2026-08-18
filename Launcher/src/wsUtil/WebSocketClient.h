@@ -40,9 +40,9 @@ public:
 
 	/**
 	 * 连接ws 路径参数：ws://localhost:8080/ws/{group}/{id}
-	 * group->分组     id->设备id
+	 * group->分组     id->设备唯一标识（UUID 字符串）
 	 */
-	void connect(const std::string& group, int id);
+	void connect(const std::string& group, const std::string& id);
 
 	/**
 	 * 断开并清理ws连接

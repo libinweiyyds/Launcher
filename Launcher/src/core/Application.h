@@ -72,8 +72,18 @@ private:
     // 当前流程检查到的服务端推荐版本（用于回滚时约束"不许启动比推荐版还新的版本"）
     std::string m_lastRecommendVersion;
 
+    // 当前流程检查到的服务端 softwareId（兜底下载用，handleUpdateFailure 不需要重新请求发布信息）
+    int m_lastSoftwareId = 0;
+
+    // 当前流程检查到的服务端 clientReserveNum（兜底下载的清理保留数）
+    int m_lastReserveNum = 2;
+
     // 显示启动失败弹窗（仅确认按钮）
     void showStartupFailureDialog(const std::wstring& reason);
+
+    // 拉取并写入远程配置到管理软件 exe 的相对路径下
+    // 失败弹窗但不影响后续启动管理软件
+    void syncManagedConfig();
 
     // 更新失败后的统一处理：先回滚，回滚失败再弹窗 + 让主循环退出
     void handleUpdateFailure();

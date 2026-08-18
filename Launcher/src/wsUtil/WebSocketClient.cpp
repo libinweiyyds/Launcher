@@ -26,7 +26,7 @@ WebSocketClient::~WebSocketClient()
     disconnect();
 }
 
-void WebSocketClient::connect(const std::string& group, int id)
+void WebSocketClient::connect(const std::string& group, const std::string& id)
 {
     if (m_state != State::Disconnected) {
         std::cerr << "[WebSocketClient] 已经连接或者连接中......"
