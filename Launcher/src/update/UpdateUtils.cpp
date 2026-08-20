@@ -173,6 +173,7 @@ RemoteConfig UpdateUtils::fetchRemoteConfig(const std::string& host, int port,
     }
 
     cfg.sha256 = data.get("sha256", "").asString();
+    cfg.configId = data.get("config_id", "").asString();
     cfg.content = data.get("content", "").asString();
     cfg.localFilePath = data.get("localFilePath", "").asString();
     cfg.valid = !cfg.sha256.empty() && !cfg.content.empty() && !cfg.localFilePath.empty();

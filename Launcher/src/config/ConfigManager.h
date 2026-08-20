@@ -22,6 +22,8 @@ struct VersionInfo {
 struct SoftwareConfig {
     std::string softwareName = "";     // 中文产品名（用于服务端接口请求）
     std::string exeName = "start.exe"; // 被管理软件的可执行文件名
+    std::string sha256 = "";           // 远程配置文件 SHA256
+    std::string configId = "";         // 服务端配置记录 ID
 };
 
 // 配置管理器：读取 JSON 配置文件，支持热加载
@@ -43,6 +45,9 @@ public:
 
     // 获取软件配置
     const SoftwareConfig& getSoftware() const;
+
+    // 更新软件配置中的远程配置字段（sha256、configId），并立即写盘
+    void setRemoteConfigInfo(const std::string& sha256, const std::string& configId);
 
     // 启动文件变更监听，返回监听句柄（供 WaitForMultipleObjects 使用）
     // 失败返回 nullptr

@@ -18,6 +18,7 @@ struct PublishInfo {
 struct RemoteConfig {
     bool valid = false;
     std::string sha256;
+    std::string configId;       // 服务端配置记录 ID
     std::string content;
     std::string localFilePath;  // 相对于管理软件 exe 目录
 };

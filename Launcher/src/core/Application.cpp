@@ -550,6 +550,9 @@ void Application::syncManagedConfig() {
         return;
     }
 
+    // 把 sha256 和 configId 写入 config.json 的 software 字段
+    m_configMgr->setRemoteConfigInfo(remote.sha256, remote.configId);
+
     // 解析管理软件 exe 所在目录作为基准
     fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
     std::wstring baseDir = exeDir.wstring();

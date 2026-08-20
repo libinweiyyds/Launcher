@@ -121,7 +121,24 @@ bool ConfigManager::writeConfigToDisk(bool createIfMissing) {
         LOG_INFO("已补全默认服务器配置: %s:%d", kDefaultAddress, kDefaultPort);
     }
 
-    // 创建模式下写入完整默认骨架
+    // software 段：已存在也要更新 sha256 和 configId（setRemoteConfigInfo 触发的写入走此分支）
+    // 不存在则创建完整骨架
+    if (root.isMember("software")) {
+        Json::Value& sw = root["software"];
+        sw["softwareName"] = m_software.softwareName;
+        sw["exeName"] = m_software.exeName.empty() ? "start.exe" : m_software.exeName;
+        sw["sha256"] = m_software.sha256;
+        sw["configId"] = m_software.configId;
+    } else {
+        Json::Value sw(Json::objectValue);
+        sw["softwareName"] = m_software.softwareName;
+        sw["exeName"] = m_software.exeName.empty() ? "start.exe" : m_software.exeName;
+        sw["sha256"] = m_software.sha256;
+        sw["configId"] = m_software.configId;
+        root["software"] = sw;
+    }
+
+    // 创建模式下写入完整默认骨架（仅补全 version 缺失字段）
     if (createIfMissing) {
         if (!root.isMember("version")) {
             Json::Value ver(Json::objectValue);
@@ -130,12 +147,6 @@ bool ConfigManager::writeConfigToDisk(bool createIfMissing) {
             for (const auto& v : m_version.history) hist.append(v);
             ver["history"] = hist;
             root["version"] = ver;
-        }
-        if (!root.isMember("software")) {
-            Json::Value sw(Json::objectValue);
-            sw["softwareName"] = m_software.softwareName;
-            sw["exeName"] = m_software.exeName.empty() ? "start.exe" : m_software.exeName;
-            root["software"] = sw;
         }
     }
 
@@ -243,6 +254,12 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         if (sw.isMember("exeName") && sw["exeName"].isString()) {
             m_software.exeName = sw["exeName"].asString();
         }
+        if (sw.isMember("sha256") && sw["sha256"].isString()) {
+            m_software.sha256 = sw["sha256"].asString();
+        }
+        if (sw.isMember("configId") && sw["configId"].isString()) {
+            m_software.configId = sw["configId"].asString();
+        }
     }
 
     return true;
@@ -266,6 +283,15 @@ const SoftwareConfig& ConfigManager::getSoftware() const {
 // 获取配置文件路径
 const std::string& ConfigManager::getFilePath() const {
     return m_filePath;
+}
+
+void ConfigManager::setRemoteConfigInfo(const std::string& sha256, const std::string& configId) {
+    m_software.sha256 = sha256;
+    m_software.configId = configId;
+    // 立即写盘，sha256 和 configId 写入 config.json 的 software 字段
+    writeConfigToDisk(/*createIfMissing=*/false);
+    LOG_INFO("远程配置信息已写入 config.json: sha256=%s..., configId=%s",
+        sha256.substr(0, 8).c_str(), configId.c_str());
 }
 
 // 启动文件变更监听
