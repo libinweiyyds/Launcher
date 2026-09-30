@@ -60,6 +60,14 @@ int Application::run(HINSTANCE hInstance) {
 // 初始化
 // Logger → 单实例检查 → 加载配置 → 解析目标路径 → 启动子进程 → 启动 IPC
 bool Application::init() {
+    // 0. 主动设置工作目录为 exe 所在目录，避免快捷方式起始位置影响相对路径解析
+    {
+        wchar_t exePath[MAX_PATH] = { 0 };
+        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        fs::path exeDir = fs::path(exePath).parent_path();
+        SetCurrentDirectoryW(exeDir.wstring().c_str());
+    }
+
     // 1. 初始化日志系统
     if (!Logger::instance().init("./logs")) {
         return false;
@@ -67,24 +75,10 @@ bool Application::init() {
 
     LOG_INFO("日志系统初始化完成");
 
-    // 2. 单实例检查
-    m_hMutex = CreateMutexW(nullptr, TRUE, L"Global\\Launcher_SingleInstance");
-    if (m_hMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
-        LOG_ERROR("检测到已有 Launcher 实例在运行，本次启动取消");
-        if (m_hMutex) {
-            CloseHandle(m_hMutex);
-            m_hMutex = nullptr;
-        }
-        return false;
-    }
-
-    LOG_INFO("单实例检查通过");
-
-    // 3. 创建模块
+    // 2. 创建 ConfigManager
     m_configMgr = std::make_unique<ConfigManager>();
-    m_processMgr = std::make_unique<ProcessManager>();
 
-    // 4. 加载配置文件
+    // 3. 加载配置文件（必须先加载，否则 softwareName 是默认值）
     std::wstring configPath = findConfigPath();
     if (!configPath.empty()) {
         int len = WideCharToMultiByte(CP_UTF8, 0, configPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -96,7 +90,32 @@ bool Application::init() {
         m_configMgr->load("");
     }
 
-    // 5. 初始化更新模块    检查更新等操作
+    // 4. 单实例检查（Local\ + softwareName：每用户独立，避免多用户登录冲突）
+    // 注意：必须先加载 config.json，否则 softwareName 是默认空值，mutex 名就会是 "Local\\"
+    {
+        std::wstring mutexName = L"Local\\" + utf8ToWide(m_configMgr->getSoftware().softwareName);
+        if (mutexName == L"Local\\") {
+            // softwareName 加载失败时不允许启动（避免空 mutex 名冲突）
+            LOG_ERROR("softwareName 为空，无法创建唯一 mutex，拒绝启动");
+            return false;
+        }
+        m_hMutex = CreateMutexW(nullptr, TRUE, mutexName.c_str());
+        if (m_hMutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
+            LOG_ERROR("检测到已有 Launcher 实例在运行（mutex=%ls），本次启动取消", mutexName.c_str());
+            if (m_hMutex) {
+                CloseHandle(m_hMutex);
+                m_hMutex = nullptr;
+            }
+            return false;
+        }
+    }
+
+    LOG_INFO("单实例检查通过");
+
+    // 5. 创建进程管理器
+    m_processMgr = std::make_unique<ProcessManager>();
+
+    // 6. 初始化更新模块    检查更新等操作
     m_versionMgr = std::make_unique<VersionManager>();
     const VersionInfo& verInfo = m_configMgr->getVersion();
     m_versionMgr->setCurrent(verInfo.current);
@@ -105,7 +124,7 @@ bool Application::init() {
     m_zipMgr = std::make_unique<ZipManager>();
     LOG_INFO("当前版本: %s", m_versionMgr->getCurrent().c_str());
 
-    // 6. 获取服务端发布信息
+    // 7. 获取服务端发布信息
     const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
     auto pubInfo = UpdateUtils::fetchPublishInfo(ws.address, ws.port, sw.softwareName);
@@ -117,10 +136,10 @@ bool Application::init() {
         m_lastReserveNum = pubInfo.clientReserveNum;
     }
 
-    // 7. 检查更新
+    // 8. 检查更新
     checkForUpdate(pubInfo);
 
-    // 8. 动态解析目标路径: versions/{currentVersion}/{exeName}
+    // 9. 动态解析目标路径: versions/{currentVersion}/{exeName}
     std::string targetPath = "versions/" + m_versionMgr->getCurrent() + "/" + sw.exeName;
     m_currentTargetPath = resolveTargetPath(targetPath);
 
@@ -177,10 +196,20 @@ bool Application::init() {
         }
     }
 
-    // 9. 启动子进程    已经启动了则跳过避免重复启动
+    // 10. 同步远程配置（必须有配置才能启动，失败则退出）
+    if (!syncManagedConfig()) {
+        LOG_ERROR("同步配置失败，启动终止");
+        return false;
+    }
+
+    // 11. 启动子进程（已启动则跳过避免重复启动）
     if (!m_processMgr->isRunning()) {
-        // 启动管理软件前先同步远程配置（失败弹窗但不阻塞启动）
-        syncManagedConfig();
+        // 配置缺失闸门：缺失时自动重试 fetchRemoteConfig（两步 fallback），
+        // 两端点都失败才拒绝启动（防止数据丢失）
+        if (!ensureManagedConfigReady(m_currentTargetPath)) {
+            showStartupFailureDialog(L"远程配置拉取失败，无法启动被管理软件");
+            return false;
+        }
         fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
         std::wstring workingDir = exeDir.wstring();
         if (!m_processMgr->start(m_currentTargetPath, workingDir)) {
@@ -191,7 +220,7 @@ bool Application::init() {
         LOG_INFO("子进程已在运行，跳过启动");
     }
 
-    // 10. 启动 IPC 服务端
+    // 12. 启动 IPC 服务端
     /*m_ipcBridge = std::make_unique<IpcBridge>();
     m_ipcBridge->setMessageCallback(
         [this](const std::string& msg) { onIpcMessage(msg); }
@@ -202,7 +231,7 @@ bool Application::init() {
         return false;
     }*/
 
-    // 8. 连接 WebSocket
+    // 13. 连接 WebSocket
     /*m_wsClient = std::make_unique<WebSocketClient>();
     m_wsClient->onMessage(
         [this](int code, const std::string& type, const std::string& desc, const std::string& data) {
@@ -308,6 +337,29 @@ void Application::shutdown() {
     // 2.5 断开 WebSocket
     if (m_wsClient) {
         m_wsClient->disconnect();
+    }
+
+    // ★ 2.7 在终止子进程前上传配置变更
+    // 先确认一致性再退出：若当前 hash 与 baseline 不同，POST 上传；成功则更新 baseline
+    if (!m_currentTargetPath.empty() && m_configMgr) {
+        const auto& ws = m_configMgr->getWebsocket();
+        const auto& sw = m_configMgr->getSoftware();
+        fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
+        std::string baseDir = exeDir.string();
+        std::string relPath = sw.localFilePath.empty() ? "config/config.json" : sw.localFilePath;
+        std::string hostName = UpdateUtils::getCurrentUserName() + "_" + ws.id;
+        std::string baseline = m_configMgr->getSoftwareSha256();
+        ConfigSync::uploadConfigIfChanged(
+            ws.address, ws.port,
+            sw.configId,
+            hostName,
+            baseDir,
+            relPath,
+            baseline,
+            [this](const std::string& newHash) {
+                m_configMgr->setSoftwareSha256(newHash);
+                m_configMgr->writeConfigToDiskPublic();
+            });
     }
 
     // 3. 终止目标进程
@@ -530,40 +582,148 @@ void Application::showStartupFailureDialog(const std::wstring& reason) {
     MessageBoxW(nullptr, reason.c_str(), L"启动失败", MB_ICONWARNING | MB_OK);
 }
 
+// 启动前校验被管理软件配置文件存在
+// 流程：
+//   1. 检查本地配置文件是否存在
+//   2. 不存在 + allowRetry → 触发 fetchRemoteConfig（内部两步 fallback：
+//        先 fetchClientSoftwareConfig → 失败 → fetchDefaultConfig）
+//      两步都失败 → return false（弹"远程配置拉取失败，无法启动"）
+//   3. 拉取成功 → 写入磁盘（inheritAndMergeConfig），二次校验
+//   4. 不存在 + !allowRetry → 直接 return false
+// localFilePath 为空时 fallback 到 "config/config.json"
+bool Application::ensureManagedConfigReady(const std::wstring& targetPath, bool allowRetry) {
+    if (targetPath.empty()) {
+        LOG_ERROR("ensureManagedConfigReady: 目标路径为空");
+        return false;
+    }
+    const auto& sw = m_configMgr->getSoftware();
+    fs::path exeDir = fs::path(targetPath).parent_path();
+    // 与 shutdown() 第 343 行保持一致的 fallback 约定
+    std::string relPath = sw.localFilePath.empty() ? "config/config.json" : sw.localFilePath;
+    fs::path localConfigFull = exeDir / relPath;
+
+    // 1. 文件已存在 → 通过
+    if (fs::exists(localConfigFull)) {
+        return true;
+    }
+
+    // 2. 文件缺失
+    LOG_WARN("被管理软件配置文件不存在: %ls", localConfigFull.wstring().c_str());
+
+    // 2a. 不允许重试 → 直接拒绝
+    if (!allowRetry) {
+        return false;
+    }
+
+    // 2b. 允许重试 → 拉取远程配置（fetchRemoteConfig 内部两步 fallback）
+    const auto& websock = m_configMgr->getWebsocket();
+    const std::string& ver = m_versionMgr->getCurrent();
+    std::string hostName = UpdateUtils::getCurrentUserName() + "_" + websock.id;
+    RemoteConfig remote = UpdateUtils::fetchRemoteConfig(
+            websock.address, websock.port,
+            hostName, sw.softwareName, ver);
+    if (!remote.valid) {
+        // fetchRemoteConfig 已经两步 fallback，这里说明 ClientSoftwareConfig + DefaultConfig 都失败
+        LOG_ERROR("远程配置拉取失败（ClientSoftwareConfig + DefaultConfig 均失败）");
+        return false;
+    }
+
+    // 3. 写入磁盘（inheritAndMergeConfig 内部处理首次安装 / 已有 config 目录）
+    if (!ConfigSync::inheritAndMergeConfig(
+            remote, exeDir.wstring(),
+            m_versionMgr->getHistory(),
+            L"versions",
+            ver,
+            nullptr)) {
+        LOG_ERROR("配置写入失败（inheritAndMergeConfig 返回 false）");
+        return false;
+    }
+
+    // 4. 二次校验
+    if (!fs::exists(localConfigFull)) {
+        LOG_ERROR("配置写入后文件仍不存在: %ls", localConfigFull.wstring().c_str());
+        return false;
+    }
+
+    LOG_INFO("被管理软件配置文件已重新拉取: %ls", localConfigFull.wstring().c_str());
+    return true;
+}
+
 // 拉取远程配置并写入管理软件 exe 的相对路径
-// 失败弹窗但不阻塞启动（用户要求）
-void Application::syncManagedConfig() {
+// 返回 false 表示失败（需要弹窗并终止启动流程）
+bool Application::syncManagedConfig() {
     if (m_currentTargetPath.empty()) {
         LOG_WARN("syncManagedConfig: 当前目标路径为空，跳过");
-        return;
+        return false;
     }
 
     const auto& ws = m_configMgr->getWebsocket();
     const auto& sw = m_configMgr->getSoftware();
     const std::string& ver = m_versionMgr->getCurrent();
 
-    // 请求远程配置（传中文产品名 sw.softwareName，不是 exe 文件名 sw.exeName）
-    auto remote = UpdateUtils::fetchRemoteConfig(ws.address, ws.port, sw.softwareName, ver);
+    // 先查询远程配置（fetchRemoteConfig 两步 fallback）
+    std::string hostName = UpdateUtils::getCurrentUserName() + "_" + ws.id;
+    RemoteConfig remote = UpdateUtils::fetchRemoteConfig(ws.address, ws.port,
+                                           hostName, sw.softwareName, ver);
     if (!remote.valid) {
         LOG_WARN("syncManagedConfig: 获取远程配置失败");
-        showStartupFailureDialog(L"获取最新配置文件失败，将以旧配置启动");
-        return;
+        showStartupFailureDialog(L"获取最新配置文件失败，以旧配置启动");
+        // 不阻塞启动：以旧配置继续
+        return true;
     }
 
-    // 把 sha256 和 configId 写入 config.json 的 software 字段
-    m_configMgr->setRemoteConfigInfo(remote.sha256, remote.configId);
-
-    // 解析管理软件 exe 所在目录作为基准
+    // 计算目标路径（基于 remote.localFilePath）
     fs::path exeDir = fs::path(m_currentTargetPath).parent_path();
+    std::string cleanPath = remote.localFilePath;
+    while (cleanPath.size() >= 3 && cleanPath.substr(0, 3) == "../") cleanPath = cleanPath.substr(3);
+    if (cleanPath.size() >= 2 && cleanPath.substr(0, 2) == "./") cleanPath = cleanPath.substr(2);
+    fs::path localFileFull = exeDir / cleanPath;
+
+    // 写入 configId 和 localFilePath（始终写入，用于 uploadConfigIfChanged 拼接路径）
+    m_configMgr->setSoftwareConfigId(remote.configId);
+    m_configMgr->setSoftwareLocalFilePath(cleanPath);
+
     std::wstring baseDir = exeDir.wstring();
 
-    // 同步到本地
-    if (!ConfigSync::syncConfig(remote, baseDir)) {
-        LOG_ERROR("syncManagedConfig: 同步远程配置到本地失败");
-        showStartupFailureDialog(L"同步最新配置文件失败，将以旧配置启动");
-        return;
+    // 始终调用 inheritAndMergeConfig：内部判断 config 目录是否存在
+    // - 不存在：遍历 history 找旧版本复制，再合并 remote.content
+    // - 已存在：跳过复制，直接合并
+    // 注意：首次安装回调不再写 sha256，保持为空，让退出时天然上传一次
+    bool mergeOk = ConfigSync::inheritAndMergeConfig(
+            remote, baseDir,
+            m_versionMgr->getHistory(),
+            L"versions",
+            ver,
+            // 全新安装回调（空实现：保持 sha256 为空）
+            nullptr);
+
+    if (!mergeOk) {
+        LOG_ERROR("syncManagedConfig: 继承合并失败");
+        showStartupFailureDialog(L"同步最新配置文件失败，以旧配置启动");
+        return true;
+    }
+
+    // 合并后：首次安装保持 sha256 为空，强制首次退出时上传一次
+    // 非首次：与 sha256 比对决定是否需要重传
+    const std::string& baseline = m_configMgr->getSoftwareSha256();
+    if (fs::exists(localFileFull)) {
+        std::string curHash = DownloadManager::sha256(localFileFull.string());
+        if (baseline.empty()) {
+            // 首次安装：保持 sha256 为空，不写盘
+            // 退出时 uploadConfigIfChanged 会比对：空 != curHash，强制上传
+            LOG_INFO("syncManagedConfig: 首次安装，sha256 保持为空，强制退出时上传（hash=%s）",
+                curHash.substr(0, 8).c_str());
+        } else if (curHash == baseline) {
+            // sha256 匹配：已同步
+            LOG_INFO("syncManagedConfig: sha256 匹配（%s），已同步", curHash.substr(0, 8).c_str());
+        } else {
+            // sha256 不匹配：文件被改动过，不改动 sha256，退出时天然上传
+            LOG_INFO("syncManagedConfig: sha256 不匹配（文件=%s, 基准=%s），启动前不改",
+                curHash.substr(0, 8).c_str(), baseline.substr(0, 8).c_str());
+        }
     }
     LOG_INFO("syncManagedConfig: 远程配置已同步完成");
+    return true;
 }
 
 // UTF-8 字符串 → 宽字符串（用于中文显示）
@@ -608,7 +768,15 @@ bool Application::tryRollback(const std::string& maxAllowedVersion) {
         }
 
         std::wstring widePath(targetAbs.begin(), targetAbs.end());
-        if (!m_processMgr->start(widePath, L"")) {
+        // 工作目录：版本目录（保证管理软件读 ./config/config.ini 正确）
+        fs::path rollDir = fs::path(targetAbs).parent_path();
+        // 配置缺失闸门：跳过此版本，试下一个，m_currentTargetPath 不变
+        // allowRetry=false：m_versionMgr->getCurrent() 仍是失败版本，不能直接重试
+        if (!ensureManagedConfigReady(widePath, /*allowRetry=*/false)) {
+            LOG_WARN("历史版本 %s 配置不存在，跳过", ver.c_str());
+            continue;
+        }
+        if (!m_processMgr->start(widePath, rollDir.wstring())) {
             LOG_WARN("历史版本 %s 启动失败，跳过", ver.c_str());
             continue;
         }
@@ -723,9 +891,16 @@ bool Application::doUpdate(const std::string& version, int softwareId,
     std::wstring widePath(newExe.begin(), newExe.end());
     // 更新 m_currentTargetPath 用于 syncManagedConfig 解析父目录
     m_currentTargetPath = widePath;
+    // 工作目录：版本目录（保证管理软件读 ./config/config.ini 正确）
+    fs::path newExeDir = fs::path(widePath).parent_path();
     // 启动管理软件前先同步远程配置
     syncManagedConfig();
-    if (!m_processMgr->start(widePath, L"")) {
+    // 配置缺失闸门：失败则返回 false，触发 handleUpdateFailure → tryRollback
+    // allowRetry=false：syncManagedConfig 刚刚失败过，重试同一端点无意义
+    if (!ensureManagedConfigReady(widePath, /*allowRetry=*/false)) {
+        return false;
+    }
+    if (!m_processMgr->start(widePath, newExeDir.wstring())) {
         LOG_ERROR("start new version failed, rolling back");
         m_processMgr->stop();
         // 启动失败时，回滚到 history[1] 仍由调用方 tryRollback 处理

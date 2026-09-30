@@ -31,6 +31,9 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
     CURL* curl = curl_easy_init();
     if (!curl) { LOG_ERROR("curl_easy_init failed"); return resp; }
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Content-Type: application/json");
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)body.size());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
@@ -39,6 +42,7 @@ HttpResponse HttpClient::post(const std::string& url, const std::string& body) {
     CURLcode res = curl_easy_perform(curl);
     if (res == CURLE_OK) { curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &resp.code); resp.ok = true; }
     else { LOG_ERROR("curl POST failed: %s", curl_easy_strerror(res)); }
+    curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
     return resp;
 }

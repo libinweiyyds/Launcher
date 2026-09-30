@@ -81,9 +81,16 @@ private:
     // 显示启动失败弹窗（仅确认按钮）
     void showStartupFailureDialog(const std::wstring& reason);
 
+    // 启动前校验被管理软件配置文件存在
+    // targetPath: 待启动的目标 exe 路径（不同调用方路径来源不同：init 用 m_currentTargetPath，
+    //             mainLoop 热加载用 newPath，tryRollback 用 targetAbs，doUpdate 用 m_currentTargetPath）
+    // allowRetry: true = 缺失时尝试 fetchRemoteConfig 重新拉取；false = 仅检查
+    // 返回 false 表示配置缺失或拉取失败（防止 syncManagedConfig 静默失败后无配置启动）
+    bool ensureManagedConfigReady(const std::wstring& targetPath, bool allowRetry = true);
+
     // 拉取并写入远程配置到管理软件 exe 的相对路径下
-    // 失败弹窗但不影响后续启动管理软件
-    void syncManagedConfig();
+    // 返回 true 表示成功，false 表示失败（弹窗后终止启动流程）
+    bool syncManagedConfig();
 
     // 更新失败后的统一处理：先回滚，回滚失败再弹窗 + 让主循环退出
     void handleUpdateFailure();

@@ -22,8 +22,9 @@ struct VersionInfo {
 struct SoftwareConfig {
     std::string softwareName = "";     // 中文产品名（用于服务端接口请求）
     std::string exeName = "start.exe"; // 被管理软件的可执行文件名
-    std::string sha256 = "";           // 远程配置文件 SHA256
+    std::string sha256 = "";           // 远程配置文件 SHA256（基准 Hash）
     std::string configId = "";         // 服务端配置记录 ID
+    std::string localFilePath = "";    // 管理软件本地配置文件路径（例：./versions/{ver}/config/config.json）
 };
 
 // 配置管理器：读取 JSON 配置文件，支持热加载
@@ -46,8 +47,25 @@ public:
     // 获取软件配置
     const SoftwareConfig& getSoftware() const;
 
-    // 更新软件配置中的远程配置字段（sha256、configId），并立即写盘
-    void setRemoteConfigInfo(const std::string& sha256, const std::string& configId);
+    // 读取 software.sha256（启动阶段只读，不写入）
+    const std::string& getSoftwareSha256() const;
+
+    // 写入 software.sha256（仅退出上传成功后调用，仅更新内存）
+    // 调用方需自行触发 writeConfigToDiskPublic() 写盘
+    void setSoftwareSha256(const std::string& hash);
+
+    // 写入 software.configId 并立即写盘（启动器阶段可用，标识当前远程配置记录）
+    void setSoftwareConfigId(const std::string& configId);
+
+    // 写入 software.localFilePath 并立即写盘（记录管理软件配置文件本地路径）
+    void setSoftwareLocalFilePath(const std::string& path);
+
+    // 公开接口：在 setSoftwareSha256 后由调用方触发写盘
+    bool writeConfigToDiskPublic() { return writeConfigToDisk(false); }
+
+    // 更新 version.current + version.history 并写盘（升级时使用）
+    bool setCurrentVersion(const std::string& newVer,
+                            const std::vector<std::string>& newHistory);
 
     // 启动文件变更监听，返回监听句柄（供 WaitForMultipleObjects 使用）
     // 失败返回 nullptr

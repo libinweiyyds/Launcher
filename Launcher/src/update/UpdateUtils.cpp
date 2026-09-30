@@ -1,6 +1,11 @@
 ﻿#include "UpdateUtils.h"
 #include "HttpClient.h"
 #include "../logger/Logger.h"
+#include <Windows.h>
+#undef ERROR
+#ifdef max
+#undef max
+#endif
 #include <json/json.h>
 #include <fstream>
 #include <sstream>
@@ -27,7 +32,7 @@ PublishInfo UpdateUtils::fetchPublishInfo(const std::string& host, int port,
     std::string url = "http://" + host + ":" + std::to_string(port) +
         "/sms/software/publish/getPublishBySoftWareName?softWareName=" + urlEncode(softwareName);
 
-    LOG_INFO("checking publish: %s", url.c_str());
+    LOG_INFO("checking publish: %s (软件名: %s)", url.c_str(), softwareName.c_str());
     HttpResponse resp = HttpClient::get(url);
     if (!resp.ok || resp.body.empty()) {
         LOG_WARN("publish check failed (network)");
@@ -134,57 +139,133 @@ bool UpdateUtils::updateConfigVersion(const std::string& configPath,
     return true;
 }
 
-// 请求远程配置（服务端下发的运行时配置）
-// softwareName：中文产品名（来自 config.json 的 softwareName 字段），不是 exe 文件名
-RemoteConfig UpdateUtils::fetchRemoteConfig(const std::string& host, int port,
-                                            const std::string& softwareName,
-                                            const std::string& version) {
+// 解析 HTTP 响应为 RemoteConfig（共用解析逻辑）
+static RemoteConfig parseConfigResponse(const HttpResponse& resp, const char* tag) {
     RemoteConfig cfg;
-    std::string url = "http://" + host + ":" + std::to_string(port) +
-        "/sms/software/getConfig?softwareName=" + urlEncode(softwareName) +
-        "&version=" + version;
-
-    LOG_INFO("fetching remote config: %s", url.c_str());
-    HttpResponse resp = HttpClient::get(url);
     if (!resp.ok || resp.body.empty()) {
-        LOG_WARN("remote config fetch failed (network)");
+        LOG_WARN("%s fetch failed (network)", tag);
         return cfg;
     }
-
     Json::Value root;
     Json::CharReaderBuilder builder;
     std::string errors;
     std::istringstream stream(resp.body);
     if (!Json::parseFromStream(builder, stream, &root, &errors)) {
-        LOG_ERROR("remote config JSON parse error: %s", errors.c_str());
+        LOG_ERROR("%s JSON parse error: %s", tag, errors.c_str());
         return cfg;
     }
-
     int code = root.get("code", 0).asInt();
     if (code != 200) {
-        LOG_WARN("remote config code=%d, skip", code);
+        LOG_WARN("%s code=%d, skip", tag, code);
         return cfg;
     }
-
     const Json::Value& data = root["data"];
     if (data.empty()) {
-        LOG_WARN("remote config data empty");
+        LOG_WARN("%s data empty", tag);
         return cfg;
     }
-
     cfg.sha256 = data.get("sha256", "").asString();
     cfg.configId = data.get("config_id", "").asString();
     cfg.content = data.get("content", "").asString();
     cfg.localFilePath = data.get("localFilePath", "").asString();
     cfg.valid = !cfg.sha256.empty() && !cfg.content.empty() && !cfg.localFilePath.empty();
-
     if (cfg.valid) {
-        LOG_INFO("remote config fetched: sha256=%s..., localFilePath=%s",
-            cfg.sha256.substr(0, 8).c_str(), cfg.localFilePath.c_str());
+        LOG_INFO("%s fetched: sha256=%s..., configId=%s, localFilePath=%s",
+            tag, cfg.sha256.substr(0, 8).c_str(), cfg.configId.c_str(), cfg.localFilePath.c_str());
     } else {
-        LOG_WARN("remote config incomplete (sha256/content/localFilePath 任一为空)");
+        LOG_WARN("%s incomplete (sha256/content/localFilePath 任一为空)", tag);
     }
     return cfg;
+}
+
+// 请求本机配置（按 hostName 拉取，每台电脑独立）
+// GET /sms/software/getClientSoftWareConfig?hostName=...&softwareName=...&version=...
+RemoteConfig UpdateUtils::fetchClientSoftwareConfig(const std::string& host, int port,
+                                                    const std::string& hostName,
+                                                    const std::string& softwareName,
+                                                    const std::string& version) {
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/getClientSoftWareConfig?hostName=" + urlEncode(hostName) +
+        "&softwareName=" + urlEncode(softwareName) +
+        "&version=" + version;
+    LOG_INFO("fetching client software config: %s (软件名: %s)", url.c_str(), softwareName.c_str());
+    HttpResponse resp = HttpClient::get(url);
+    return parseConfigResponse(resp, "client config");
+}
+
+// 拉取默认配置（旧接口，所有客户端共享，作为首次安装兜底）
+// GET /sms/software/getConfig?softwareName=...&version=...
+RemoteConfig UpdateUtils::fetchDefaultConfig(const std::string& host, int port,
+                                             const std::string& softwareName,
+                                             const std::string& version) {
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/getConfig?softwareName=" + urlEncode(softwareName) +
+        "&version=" + version;
+    LOG_INFO("fetching default config: %s (软件名: %s)", url.c_str(), softwareName.c_str());
+    HttpResponse resp = HttpClient::get(url);
+    return parseConfigResponse(resp, "default config");
+}
+
+// 请求远程配置（时序：先本机配置，无返回再默认配置）
+RemoteConfig UpdateUtils::fetchRemoteConfig(const std::string& host, int port,
+                                            const std::string& hostName,
+                                            const std::string& softwareName,
+                                            const std::string& version) {
+    // 1. 先拉本机配置（每台电脑自己的那份，避免被默认值覆盖用户修改）
+    RemoteConfig cfg = fetchClientSoftwareConfig(host, port, hostName, softwareName, version);
+    if (cfg.valid) return cfg;
+
+    // 2. 本机无配置（首次安装）→ 拉默认配置
+    LOG_INFO("fetchRemoteConfig: 本机配置无效，fallback 到默认配置");
+    cfg = fetchDefaultConfig(host, port, softwareName, version);
+    return cfg;
+}
+
+// 上传本机配置
+// POST /sms/software/addClientConfig
+// jsonBody: 调用方构造好的 JSON 字符串
+bool UpdateUtils::uploadClientConfig(const std::string& host, int port,
+                                     const std::string& jsonBody) {
+    std::string url = "http://" + host + ":" + std::to_string(port) +
+        "/sms/software/addClientConfig";
+    LOG_INFO("uploading client config: %s", url.c_str());
+    HttpResponse resp = HttpClient::post(url, jsonBody);
+    if (!resp.ok || resp.body.empty()) {
+        LOG_WARN("upload failed (network)");
+        return false;
+    }
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errors;
+    std::istringstream stream(resp.body);
+    if (!Json::parseFromStream(builder, stream, &root, &errors)) {
+        LOG_ERROR("upload response JSON parse error: %s", errors.c_str());
+        return false;
+    }
+    int code = root.get("code", 0).asInt();
+    if (code != 200||code !=307) {
+        LOG_WARN("upload code=%d, msg=%s", code, root.get("msg", "").asString().c_str());
+        return false;
+    }
+    LOG_INFO("upload success");
+    return true;
+}
+
+// 获取当前 Windows 登录用户名（UTF-8 narrow）
+// 用于 hostName 字段
+std::string UpdateUtils::getCurrentUserName() {
+    wchar_t username[256] = { 0 };
+    DWORD size = 256;
+    if (!GetUserNameW(username, &size)) {
+        LOG_WARN("GetUserNameW failed");
+        return "";
+    }
+    // UTF-16 → UTF-8
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, username, -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) return "";
+    std::string result(utf8Len - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, username, -1, &result[0], utf8Len, nullptr, nullptr);
+    return result;
 }
 
 // 版本号比较

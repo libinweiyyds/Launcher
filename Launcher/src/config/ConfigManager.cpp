@@ -1,5 +1,6 @@
 ﻿#include "ConfigManager.h"
 #include "../logger/Logger.h"
+#include "../update/UpdateUtils.h"
 #include <json/json.h>
 #include <fstream>
 #include <sstream>
@@ -111,17 +112,13 @@ bool ConfigManager::writeConfigToDisk(bool createIfMissing) {
         sv["address"] = kDefaultAddress;
         sv["port"] = kDefaultPort;
         sv["group"] = m_websocket.group.empty() ? "launcher" : m_websocket.group;
-        // id 缺失时生成新 UUID，保证每台设备唯一
-        if (m_websocket.id.empty()) {
-            m_websocket.id = generateUuid();
-            LOG_INFO("已生成新设备 UUID: %s", m_websocket.id.c_str());
-        }
+        // id 缺失不再生成 UUID；由 parseJson 中的占位检测统一兜底为 "1"
         sv["id"] = m_websocket.id;
         root["server"] = sv;
         LOG_INFO("已补全默认服务器配置: %s:%d", kDefaultAddress, kDefaultPort);
     }
 
-    // software 段：已存在也要更新 sha256 和 configId（setRemoteConfigInfo 触发的写入走此分支）
+    // software 段：已存在也要更新所有字段（启动器任何阶段的写盘都走此分支）
     // 不存在则创建完整骨架
     if (root.isMember("software")) {
         Json::Value& sw = root["software"];
@@ -129,12 +126,14 @@ bool ConfigManager::writeConfigToDisk(bool createIfMissing) {
         sw["exeName"] = m_software.exeName.empty() ? "start.exe" : m_software.exeName;
         sw["sha256"] = m_software.sha256;
         sw["configId"] = m_software.configId;
+        sw["localFilePath"] = m_software.localFilePath;
     } else {
         Json::Value sw(Json::objectValue);
         sw["softwareName"] = m_software.softwareName;
         sw["exeName"] = m_software.exeName.empty() ? "start.exe" : m_software.exeName;
         sw["sha256"] = m_software.sha256;
         sw["configId"] = m_software.configId;
+        sw["localFilePath"] = m_software.localFilePath;
         root["software"] = sw;
     }
 
@@ -212,7 +211,8 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         }
     }
 
-    // id 空或为占位全零 → 视为未初始化，重新生成 UUID 并写盘
+    // id 空或为占位全零 → 初始化为默认值 "1" 并写盘
+    // 不再调用 generateUuid()，信任配置 id 值；由调用方决定 id 唯一性策略
     auto isPlaceholderUuid = [](const std::string& s) {
         if (s.empty()) return true;
         std::string norm;
@@ -222,10 +222,10 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         for (char c : norm) if (c != '0') return false;
         return true;
     };
-    if (isPlaceholderUuid(m_websocket.id)) {
-        m_websocket.id = generateUuid();
-        LOG_WARN("原 id 为空或占位符，已重新生成 UUID: %s", m_websocket.id.c_str());
-        // 写盘让新 id 落地，下次启动保持稳定
+    if (m_websocket.id.empty() || isPlaceholderUuid(m_websocket.id)) {
+        m_websocket.id = "1";
+        LOG_WARN("server.id 为空或占位符，初始化为默认值 \"1\"");
+        // 写盘让默认值落地，下次启动保持稳定
         writeConfigToDisk(/*createIfMissing=*/false);
     }
 
@@ -260,6 +260,9 @@ bool ConfigManager::parseJson(const std::string& jsonContent) {
         if (sw.isMember("configId") && sw["configId"].isString()) {
             m_software.configId = sw["configId"].asString();
         }
+        if (sw.isMember("localFilePath") && sw["localFilePath"].isString()) {
+            m_software.localFilePath = sw["localFilePath"].asString();
+        }
     }
 
     return true;
@@ -285,13 +288,39 @@ const std::string& ConfigManager::getFilePath() const {
     return m_filePath;
 }
 
-void ConfigManager::setRemoteConfigInfo(const std::string& sha256, const std::string& configId) {
-    m_software.sha256 = sha256;
+// 读取 software.sha256（启动器启动阶段只读）
+const std::string& ConfigManager::getSoftwareSha256() const {
+    return m_software.sha256;
+}
+
+// 写入 software.sha256（仅退出上传成功后调用）
+// 仅更新内存，调用方需自行触发 writeConfigToDisk() 写盘
+void ConfigManager::setSoftwareSha256(const std::string& hash) {
+    m_software.sha256 = hash;
+}
+
+// 写入 software.configId 并立即写盘（启动器阶段使用）
+void ConfigManager::setSoftwareConfigId(const std::string& configId) {
     m_software.configId = configId;
-    // 立即写盘，sha256 和 configId 写入 config.json 的 software 字段
     writeConfigToDisk(/*createIfMissing=*/false);
-    LOG_INFO("远程配置信息已写入 config.json: sha256=%s..., configId=%s",
-        sha256.substr(0, 8).c_str(), configId.c_str());
+    LOG_INFO("已写入 configId: %s", configId.c_str());
+}
+
+// 写入 software.localFilePath 并立即写盘
+void ConfigManager::setSoftwareLocalFilePath(const std::string& path) {
+    m_software.localFilePath = path;
+    writeConfigToDisk(/*createIfMissing=*/false);
+    LOG_INFO("已写入 localFilePath: %s", path.c_str());
+}
+
+// 更新 version.current + version.history 并写盘
+bool ConfigManager::setCurrentVersion(const std::string& newVer,
+                                       const std::vector<std::string>& newHistory) {
+    m_version.current = newVer;
+    m_version.history = newHistory;
+    // pruneHistoryAboveCurrent 不在 ConfigManager 中；
+    // 写盘时由调用方保证不变式（VersionManager 已做）
+    return UpdateUtils::updateConfigVersion(m_filePath, newVer, newHistory);
 }
 
 // 启动文件变更监听

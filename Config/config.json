@@ -3,7 +3,7 @@
     {
         "address" : "localhost",
         "group" : "launcher",
-        "id" : "00000000-0000-0000-0000-000000000000",
+        "id" : "1",
         "port" : 8080
     },
     "software" : 
