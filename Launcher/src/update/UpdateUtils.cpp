@@ -243,7 +243,7 @@ bool UpdateUtils::uploadClientConfig(const std::string& host, int port,
         return false;
     }
     int code = root.get("code", 0).asInt();
-    if (code != 200||code !=307) {
+    if (code != 200 && code != 307) {
         LOG_WARN("upload code=%d, msg=%s", code, root.get("msg", "").asString().c_str());
         return false;
     }
